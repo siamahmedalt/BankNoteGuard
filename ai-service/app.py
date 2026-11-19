@@ -5,9 +5,13 @@ import hashlib
 from contextlib import asynccontextmanager
 import io
 import logging
+import json
+import subprocess
+import sys
+from urllib.request import urlopen, Request
+from urllib.error import URLError, HTTPError
 import os
 import pickle
-import tempfile
 import threading
 import time
 import uuid
@@ -32,6 +36,9 @@ ARCHIVE_LOCK = threading.Lock()
 INFERENCE_LOCK = threading.Lock()
 STATE_LOCK = threading.Lock()
 START_TIME = time.time()
+WORKER_URL = 'http://127.0.0.1:8002'
+WORKER_PROCESS = None
+
 MODEL_STATE = {
     "service": "online", "ready": False, "loading": True,
     "message": "Waiting for YOLO and EfficientNet initialization",
@@ -42,24 +49,49 @@ MODEL_STATE = {
 LOG = logging.getLogger("banknoteguard.ai")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s | %(message)s")
 
+def _worker_health():
+    try:
+        with urlopen(f"{WORKER_URL}/health", timeout=3) as reply:
+            return json.load(reply)
+    except (OSError, ValueError, TimeoutError) as exc:
+        return {"ready": False, "error": str(exc), "message": "EfficientNet worker unavailable"}
+
+
 def _bootstrap_models():
+    global WORKER_PROCESS
     with STATE_LOCK:
         MODEL_STATE.update(loading=True, ready=False, error=None,
-                           message="Loading YOLO and EfficientNet-B0")
-    LOG.info("Starting AI models initialization")
+                           message="Loading YOLO and separate EfficientNet worker")
+    LOG.info("Starting isolated model processes: YOLO stays in API; TensorFlow runs in local worker")
     try:
+        # This child is isolated from PyTorch native libraries loaded by this API process.
+        WORKER_PROCESS = subprocess.Popen([
+            sys.executable, '-m', 'uvicorn', 'classifier_worker:app',
+            '--host', '127.0.0.1', '--port', '8002', '--workers', '1'
+        ], cwd=str(BASE), stdout=None, stderr=None)
         detector = get_detector()
         names = normalize_names(detector.names)
         mode = detector_mode_from_names(detector.names)
-        get_classifier()
+        deadline = time.monotonic() + 180
+        while time.monotonic() < deadline:
+            if WORKER_PROCESS.poll() is not None:
+                raise RuntimeError(f"EfficientNet worker exited (code {WORKER_PROCESS.returncode})")
+            state = _worker_health()
+            if state.get('ready'):
+                break
+            if state.get('error') and state.get('loading') is False:
+                raise RuntimeError('EfficientNet worker failed: ' + str(state['error']))
+            time.sleep(1)
+        else:
+            raise TimeoutError('EfficientNet worker did not become ready in 180 seconds')
         with STATE_LOCK:
             MODEL_STATE.update(loading=False, ready=True, error=None,
                                classifierReady=True, detectorMode=mode,
                                detectorClasses=[names[n] for n in sorted(names)],
-                               message="YOLO and EfficientNet-B0 loaded")
-        LOG.info("ALL MODELS READY: %s, %s", mode, names)
+                               message="YOLO and isolated EfficientNet worker ready")
+        LOG.info("ALL MODELS READY: YOLO=%s; classifier worker PID=%s", mode, WORKER_PROCESS.pid)
     except Exception as exc:
-        LOG.exception("AI model initialization failed")
+        LOG.exception('AI model initialization failed')
         with STATE_LOCK:
             MODEL_STATE.update(loading=False, ready=False, classifierReady=False,
                                error=f"{type(exc).__name__}: {exc}",
@@ -70,7 +102,12 @@ def _bootstrap_models():
 async def lifespan(_app):
     threading.Thread(target=_bootstrap_models, daemon=True, name="ai-model-loader").start()
     yield
-
+    if WORKER_PROCESS is not None and WORKER_PROCESS.poll() is None:
+        WORKER_PROCESS.terminate()
+        try:
+            WORKER_PROCESS.wait(timeout=8)
+        except subprocess.TimeoutExpired:
+            WORKER_PROCESS.kill()
 
 app = FastAPI(title="BankNoteGuard AI Service", version="2.2.0", lifespan=lifespan)
 
@@ -122,18 +159,12 @@ def detector_mode_from_names(names):
     )
 
 
-@lru_cache(maxsize=1)
 def get_classifier():
-    import tensorflow as tf
-
-    bundle = load_bundle_metadata()
-    LOG.info("Loading EfficientNet-B0 checkpoint (%s bytes)", len(bundle["keras_model_bytes"]))
-    with tempfile.TemporaryDirectory() as folder:
-        filename = Path(folder) / "best_efficientnetb0.keras"
-        filename.write_bytes(bundle["keras_model_bytes"])
-        model = tf.keras.models.load_model(str(filename), compile=False, safe_mode=True)
-    LOG.info("EfficientNet-B0 ready; fake threshold=%.6f", bundle["decision_threshold"])
-    return model, bundle
+    """Backward-compatible readiness accessor; TensorFlow never loads in this process."""
+    state = _worker_health()
+    if not state.get('ready'):
+        raise RuntimeError('EfficientNet worker not ready: ' + str(state.get('error') or state.get('message')))
+    return state
 
 
 @lru_cache(maxsize=1)
@@ -149,20 +180,19 @@ def get_detector():
 
 
 def classify_note(cropped: Image.Image):
-    model, bundle = get_classifier()
-    height, width = bundle["preprocessing"]["image_size"]
-    rgb = cropped.convert("RGB").resize((width, height), Image.Resampling.LANCZOS)
-    pixels = np.expand_dims(np.asarray(rgb, dtype=np.float32), axis=0)
-    # Preserve the supplied model's preprocessing: no external /255 normalization.
-    p_fake = float(model.predict(pixels, verbose=0)[0][0])
-    threshold = float(bundle["decision_threshold"])
-    is_fake = p_fake >= threshold
-    return {
-        "status": "FAKE" if is_fake else "REAL",
-        "fakeProbability": round(p_fake, 6),
-        "confidence": round(p_fake if is_fake else 1 - p_fake, 6),
-        "threshold": round(threshold, 6),
-    }
+    """Send only the cropped note to TensorFlow's isolated loopback-only worker."""
+    buffer = io.BytesIO()
+    cropped.convert('RGB').save(buffer, format='PNG')
+    request = Request(WORKER_URL + '/classify', data=buffer.getvalue(),
+                      headers={'Content-Type': 'image/png'}, method='POST')
+    try:
+        with urlopen(request, timeout=90) as response:
+            result = json.load(response)
+    except (OSError, ValueError, TimeoutError) as exc:
+        raise RuntimeError('EfficientNet worker inference unavailable: ' + str(exc)) from exc
+    if result.get('status') not in ('REAL', 'FAKE'):
+        raise ValueError('Invalid classifier worker result')
+    return result
 
 
 def detect_note(img: Image.Image):
@@ -262,6 +292,12 @@ def health_live():
 def health():
     with STATE_LOCK:
         status = dict(MODEL_STATE)
+    if status.get('ready'):
+        worker = _worker_health()
+        if not worker.get('ready') or (WORKER_PROCESS is not None and WORKER_PROCESS.poll() is not None):
+            status.update(ready=False, classifierReady=False, loading=False,
+                          message='EfficientNet worker disconnected; check AI logs',
+                          error=worker.get('error') or 'Worker process exited')
     status.update({
         "uptimeSeconds": round(time.time() - START_TIME),
         "classifierBundlePresent": MODEL_PATH.is_file(),
@@ -281,6 +317,8 @@ def predict(image: UploadFile = File(...), source: str = Form("upload"), request
         message = MODEL_STATE["message"]
     if not ready:
         raise HTTPException(503, message)
+    if not _worker_health().get('ready'):
+        raise HTTPException(503, 'EfficientNet worker is temporarily unavailable')
     raw = image.file.read(MAX_SIZE + 1)
     if len(raw) > MAX_SIZE:
         raise HTTPException(413, "Maximum image size is 10 MB")
