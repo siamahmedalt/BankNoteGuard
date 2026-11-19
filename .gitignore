@@ -1,0 +1,11 @@
+.venv/
+node_modules/
+dist/
+__pycache__/
+.pytest_cache/
+*.pyc
+ai-service/storage/
+ai-service/runs/
+backend/target/
+.idea/
+.vscode/

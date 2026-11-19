@@ -1,0 +1,8 @@
+# Example; replace /absolute/path with your annotated dataset root.
+# Must include images/train, images/val, labels/train, labels/val.
+path: /absolute/path/to/annotated_banknotes
+train: images/train
+val: images/val
+names:
+  0: 500_taka
+  1: 1000_taka

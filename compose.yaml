@@ -1,0 +1,73 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: banknoteguard
+      POSTGRES_USER: banknoteguard
+      POSTGRES_PASSWORD: banknoteguard
+    ports:
+      - "5433:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U banknoteguard -d banknoteguard"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  ai:
+    build: ./ai-service
+    restart: unless-stopped
+    init: true
+    environment:
+      BANKNOTE_MODEL_PATH: /app/models/best_efficientnetb0.pkl
+      YOLO_WEIGHTS_PATH: /app/models/banknotes_yolo.pt
+      STORAGE_DIR: /app/storage
+      YOLO_CONFIDENCE: "0.35"
+      OMP_NUM_THREADS: "2"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "2"
+      TF_NUM_INTRAOP_THREADS: "2"
+      TF_NUM_INTEROP_THREADS: "1"
+      TF_CPP_MIN_LOG_LEVEL: "2"
+      TORCH_NUM_THREADS: "2"
+    ports:
+      - "8001:8000"
+    volumes:
+      - ./ai-service/models:/app/models:ro
+      - ai_data:/app/storage
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,json,sys; d=json.load(urllib.request.urlopen('http://127.0.0.1:8000/health',timeout=5)); sys.exit(0 if d.get('ready') else 1)"]
+      interval: 15s
+      timeout: 7s
+      retries: 15
+      start_period: 180s
+
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: jdbc:postgresql://postgres:5432/banknoteguard
+      DATABASE_USER: banknoteguard
+      DATABASE_PASSWORD: banknoteguard
+      AI_SERVICE_URL: http://ai:8000
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ai:
+        condition: service_started
+    ports:
+      - "8081:8081"
+
+  web:
+    build: ./frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "5174:80"
+
+volumes:
+  pg_data:
+  ai_data:
