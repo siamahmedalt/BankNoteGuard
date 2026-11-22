@@ -1,6 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import { Camera, Check, Clock3, History, ImagePlus, RefreshCw, ScanLine, Upload, X } from 'lucide-react'
 
+// Local Docker uses relative /api routes through Nginx; Render Static Site uses an absolute backend URL.
+const API_BASE = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '')
+const apiUrl = path => `${API_BASE}${path}`
+
 const ACCEPTED = new Set(['image/jpeg', 'image/png', 'image/webp'])
 const percent = value => value == null ? '—' : `${(Number(value) * 100).toFixed(1)}%`
 const dateLabel = value => value ? new Date(value).toLocaleString() : '—'
@@ -113,7 +117,7 @@ export default function App() {
 
   const refreshSystem = async () => {
     try {
-      const response = await fetch('/api/system', { cache: 'no-store' })
+      const response = await fetch(apiUrl('/api/system'), { cache: 'no-store' })
       if (!response.ok) throw new Error(`Backend returned ${response.status}`)
       const data = await response.json()
       setSystem(data)
@@ -127,7 +131,7 @@ export default function App() {
 
   const refreshHistory = async () => {
     try {
-      const response = await fetch('/api/scans', { cache: 'no-store' })
+      const response = await fetch(apiUrl('/api/scans'), { cache: 'no-store' })
       if (response.ok) {
         const data = await response.json()
         if (Array.isArray(data)) setHistory(data)
@@ -156,13 +160,13 @@ export default function App() {
     body.append('image', file)
     body.append('source', source)
     try {
-      const response = await fetch('/api/scans', { method: 'POST', body })
+      const response = await fetch(apiUrl('/api/scans'), { method: 'POST', body })
       let data = {}
       try { data = await response.json() } catch {}
       if (!response.ok) {
         const detail = data.error || data.detail || data.message || `Request failed (${response.status})`
         throw new Error(response.status === 403
-          ? `Request forbidden (403). Check backend CORS for localhost:5174. ${detail}`
+          ? `Request forbidden (403). Check backend APP_CORS_ORIGINS for the active frontend URL. ${detail}`
           : detail)
       }
       setResult(data)
