@@ -4,7 +4,7 @@ This package is based on your uploaded `BankNoteGuard_Minimal_White_Updated(1).z
 
 ## Fixed
 
-- Frontend Docker host port is **5174** 
+- Frontend Docker host port is **5174** (not 5173); your existing website on 5173 is unaffected.
 - Vite development port is also **5174** with `strictPort`.
 - Java Spring CORS allows `http://localhost:5174` and `http://127.0.0.1:5174`; the old whitelist caused possible `403 Invalid CORS request` on image POST.
 - Python FastAPI is responsive while models load. `/health` reports `loading`, `ready`, `error`, and model-file presence. `/health/live` confirms server availability.
