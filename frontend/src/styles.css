@@ -86,15 +86,10 @@ a {
 }
 
 .wordmark-icon {
-  display: grid;
+  display: block;
+  flex: 0 0 auto;
   width: 34px;
   height: 34px;
-  place-items: center;
-  background: #111111;
-  color: #ffffff;
-  font-size: 17px;
-  font-weight: 800;
-  letter-spacing: 0;
 }
 
 .navigation {
@@ -119,23 +114,6 @@ a {
   border-bottom-color: #111111;
 }
 
-.system-indicator,
-.readiness {
-  display: block;
-  flex: 0 0 auto;
-  width: 9px;
-  height: 9px;
-  background: #b7b7b7;
-}
-
-.system-indicator {
-  margin-left: auto;
-}
-
-.system-indicator.ready,
-.readiness.ready {
-  background: #111111;
-}
 
 .main-content {
   width: min(100% - 48px, 1240px);
@@ -471,13 +449,6 @@ a {
     gap: 8px;
   }
 
-  .history-header-row span:nth-child(4),
-  .history-header-row span:nth-child(5),
-  .history-row span:nth-child(4),
-  .history-row span:nth-child(5) {
-    display: none;
-  }
-
   .history-row {
     min-height: 54px;
     font-size: 11px;
@@ -584,8 +555,6 @@ a {
   .history-header-row, .history-row {
     grid-template-columns: minmax(110px, 1.4fr) minmax(65px, .8fr) minmax(65px, .8fr);
   }
-  .history-header-row span:nth-child(4), .history-header-row span:nth-child(5),
-  .history-row span:nth-child(4), .history-row span:nth-child(5) { display: none; }
 }
 
 /* Tablet/mobile: stack the scanner above the history. */
@@ -601,3 +570,11 @@ a {
   .scanner-controls, .inline-message, .scan-result { width: min(100%, 350px); }
   .history-section { padding-bottom: 32px; }
 }
+
+.history-actions { display: flex; gap: 8px; align-items: center; }
+.clear-history-button { border: 1px solid #111; background: #fff; color: #111; padding: 9px 12px; cursor: pointer; font: inherit; font-size: 12px; }
+.clear-history-button:disabled { opacity: .45; cursor: not-allowed; }
+.history-table { overflow-x: auto; }
+.history-header-row, .history-row { grid-template-columns: minmax(100px, 1.2fr) minmax(95px, 1fr) 78px minmax(62px, .7fr) minmax(74px, .8fr) minmax(55px, .6fr); gap: 8px; min-width: 510px; }
+.history-thumbnail img { width: 74px; height: 48px; object-fit: contain; border: 1px solid #ddd; border-radius: 4px; }
+.history-thumbnail span { font-size: 10px; color: #666; }

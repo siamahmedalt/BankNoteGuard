@@ -23,3 +23,32 @@ def test_predict_gives_readiness_error_instead_of_hanging():
             })
             assert response.status_code == 503
             assert 'detail' in response.json()
+
+
+def test_full_note_upload_contract(monkeypatch, tmp_path):
+    import io
+    from PIL import Image
+    monkeypatch.setattr(ai, 'STORAGE', tmp_path)
+    monkeypatch.setattr(ai, 'MODEL_STATE', {'ready': True, 'message': 'ready'})
+    monkeypatch.setattr(ai, '_worker_health', lambda: {'ready': True})
+    monkeypatch.setattr(ai, 'VERIFY_MULTIPLE_NOTES', False)
+    monkeypatch.setattr(ai, 'detect_candidates', lambda img: [
+        {'bbox': (10,10,150,100), 'confidence': .95, 'denomination': None},
+        {'bbox': (200,10,390,100), 'confidence': .94, 'denomination': None},
+    ])
+    monkeypatch.setattr(ai, 'classify_note', lambda img: {
+        'status': 'REAL', 'confidence': .97, 'fakeProbability': .02,
+        'threshold': None, 'reason': None,
+    })
+    raw = io.BytesIO()
+    Image.new('RGB', (400,200)).save(raw, 'PNG')
+    scan_id = 'e719c8d0-e8c7-4c17-a7e3-093407d5fb20'
+    with patch.object(ai, '_bootstrap_models', lambda: None):
+        with TestClient(ai.app) as client:
+            response = client.post('/predict', files={'image': ('note.png',raw.getvalue(),'image/png')},
+                                   data={'source':'upload','request_id':scan_id})
+            assert response.status_code == 200
+            body = response.json()
+            assert body['status'] == 'REAL' and body['requestId'] == scan_id
+            assert body['inferencePath'] == 'full_image_primary' and body['detectorBoxCount'] == 2
+            assert client.get('/history-image/'+scan_id).status_code == 200

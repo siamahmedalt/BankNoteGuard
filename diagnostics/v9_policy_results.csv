@@ -1,0 +1,22 @@
+file,provided_label,nearest_raw_status,nearest_raw_confidence,policy_status_without_yolo,policy_confidence,inference_path
+1000.2.jpg,REAL (user label),REAL,0.58451,REJECTED,,review_uncertain
+1000.3.jpg,REAL (user label),REAL,0.998604,REAL,0.998604,full_image_primary
+1000tk.jpg,REAL (user label),FAKE,0.532045,REJECTED,,review_uncertain
+100tk.jpeg,REAL (user label),REAL,0.992496,REAL,0.992496,full_image_primary
+330393168.jpg,REAL (user label),REAL,0.604115,REJECTED,,review_uncertain
+500.2tk.jpeg,REAL (user label),REAL,0.649984,REJECTED,,review_uncertain
+500tk.jpg,REAL (user label),FAKE,0.950784,FAKE,0.864303,multi_view_verified
+50tk.jpeg,REAL (user label),REAL,0.562892,REJECTED,,review_uncertain
+642fe42640e696.15636740-original.jpg,REAL (user label),REAL,0.901212,REAL,0.901212,full_image_primary
+73918_A.jpg,REAL (user label),REAL,0.993082,REAL,0.993082,full_image_primary
+Bangladesh_1000_front.jpg,REAL (user label),REAL,0.624129,REJECTED,,review_uncertain
+Bangladesh_p59i_1000_Taka_2020_t.jpg,REAL (user label),FAKE,0.81795,FAKE,0.872229,multi_view_verified
+IMG_20261125_115018.jpg.jpeg,REAL (user label),REAL,0.557184,REJECTED,,review_uncertain
+IMG_20261125_120302__01.jpg.jpeg,REAL (user label),REAL,0.799496,REAL,0.799496,full_image_primary
+IMG_20261125_120500__01.jpg.jpeg,REAL (user label),REAL,0.861156,REAL,0.861156,full_image_primary
+IMG_20261125_121050__01.jpg.jpeg,REAL (user label),REAL,0.547668,REJECTED,,review_uncertain
+WhatsApp-Image-2025-08-07-at-5.56.21-AM-1.webp,REAL (user label),FAKE,0.92807,FAKE,0.923338,multi_view_verified
+images.jpg,REAL (user label),REAL,0.997342,REAL,0.997342,full_image_primary
+note_001_6.jpg,REAL (user label),REAL,0.848526,REAL,0.848526,full_image_primary
+note_139_3.jpg,REAL (user label),REAL,0.97247,REAL,0.97247,full_image_primary
+note_clean.png,FAKE (prior screenshot label),FAKE,0.753975,FAKE,0.756458,multi_view_verified

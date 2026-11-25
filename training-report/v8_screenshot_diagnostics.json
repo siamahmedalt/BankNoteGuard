@@ -1,0 +1,148 @@
+{
+  "runtime": "Keras with PyTorch backend, no YOLO or Docker; screenshot-derived not original images",
+  "checkpoint_sha256": "3ab531b7c891cd8fa72a55adf1186dc9c299c93929f3e27aed63c4ebbb66f13d",
+  "samples": [
+    {
+      "sample": "latest_real_crop",
+      "crop": [
+        245,
+        338,
+        668,
+        818
+      ],
+      "result": {
+        "status": "REAL",
+        "confidence": 0.982772,
+        "fakeProbability": 0.017199,
+        "probabilities": {
+          "real_notes": 0.982772,
+          "fake_notes": 0.017199,
+          "not_banknotes": 2.9e-05
+        },
+        "threshold": null,
+        "reason": null
+      },
+      "policy": "full_image_primary",
+      "views": [
+        [
+          "original_lanczos",
+          {
+            "status": "REAL",
+            "confidence": 0.982772,
+            "fakeProbability": 0.017199,
+            "probabilities": {
+              "real_notes": 0.982772,
+              "fake_notes": 0.017199,
+              "not_banknotes": 2.9e-05
+            },
+            "threshold": null,
+            "reason": null
+          }
+        ]
+      ]
+    },
+    {
+      "sample": "earlier_real_crop",
+      "crop": [
+        232,
+        280,
+        654,
+        760
+      ],
+      "result": {
+        "status": "REAL",
+        "confidence": 0.983713,
+        "fakeProbability": 0.016252,
+        "probabilities": {
+          "real_notes": 0.983713,
+          "fake_notes": 0.016252,
+          "not_banknotes": 3.5e-05
+        },
+        "threshold": null,
+        "reason": null
+      },
+      "policy": "full_image_primary",
+      "views": [
+        [
+          "original_lanczos",
+          {
+            "status": "REAL",
+            "confidence": 0.983713,
+            "fakeProbability": 0.016252,
+            "probabilities": {
+              "real_notes": 0.983713,
+              "fake_notes": 0.016252,
+              "not_banknotes": 3.5e-05
+            },
+            "threshold": null,
+            "reason": null
+          }
+        ]
+      ]
+    },
+    {
+      "sample": "earlier_fake_full",
+      "crop": [
+        210,
+        416,
+        687,
+        619
+      ],
+      "result": {
+        "status": "FAKE",
+        "confidence": 0.794019,
+        "fakeProbability": 0.794019,
+        "threshold": null,
+        "reason": null
+      },
+      "policy": "multi_view_verified",
+      "views": [
+        [
+          "original_lanczos",
+          {
+            "status": "FAKE",
+            "confidence": 0.80168,
+            "fakeProbability": 0.80168,
+            "probabilities": {
+              "real_notes": 0.147324,
+              "fake_notes": 0.80168,
+              "not_banknotes": 0.050997
+            },
+            "threshold": null,
+            "reason": null
+          }
+        ],
+        [
+          "original_bilinear",
+          {
+            "status": "FAKE",
+            "confidence": 0.805007,
+            "fakeProbability": 0.805007,
+            "probabilities": {
+              "real_notes": 0.136477,
+              "fake_notes": 0.805007,
+              "not_banknotes": 0.058516
+            },
+            "threshold": null,
+            "reason": null
+          }
+        ],
+        [
+          "original_bicubic",
+          {
+            "status": "FAKE",
+            "confidence": 0.775371,
+            "fakeProbability": 0.775371,
+            "probabilities": {
+              "real_notes": 0.152176,
+              "fake_notes": 0.775371,
+              "not_banknotes": 0.072453
+            },
+            "threshold": null,
+            "reason": null
+          }
+        ]
+      ]
+    }
+  ]
+}

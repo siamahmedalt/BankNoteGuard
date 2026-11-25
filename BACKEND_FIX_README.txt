@@ -1,0 +1,1 @@
+The prior backend patch is already integrated in V7. No separate file replacement is needed. Spring Boot 3.5.16 is retained; its end-of-support notice may remain. Maven compilation has not been verified here.

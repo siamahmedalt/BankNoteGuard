@@ -13,7 +13,6 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.ByteArrayResource;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
-import org.springframework.http.HttpMethod;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
@@ -52,17 +51,20 @@ public class ScanService {
         if (image == null || image.isEmpty()) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Please supply an image");
         }
-        if (!SUPPORTED.contains(image.getContentType())) {
+        String contentType = image.getContentType();
+        if (contentType == null || !SUPPORTED.contains(contentType)) {
             throw new ResponseStatusException(HttpStatus.UNSUPPORTED_MEDIA_TYPE, "Only JPG, PNG and WebP are allowed");
         }
         if (image.getSize() > 10 * 1024 * 1024) {
             throw new ResponseStatusException(HttpStatus.PAYLOAD_TOO_LARGE, "Image is larger than 10 MB");
         }
-        if (!Set.of("camera", "upload").contains(source)) {
+        if (source == null || !Set.of("camera", "upload").contains(source)) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid scan source");
         }
-        String filename = image.getOriginalFilename() == null ? "capture.jpg"
-                : image.getOriginalFilename().replace('\\', '/').replaceAll(".*/", "");
+        String originalFilename = image.getOriginalFilename();
+        String filename = originalFilename == null ? "capture.jpg"
+                : originalFilename.replace('\\', '/').replaceAll(".*/", "");
+        if (filename.isBlank()) filename = "capture.jpg";
         if (filename.length() > 200) filename = filename.substring(filename.length() - 200);
         String id = UUID.randomUUID().toString();
         final String uploadFilename = filename;
@@ -70,7 +72,7 @@ public class ScanService {
             @Override public String getFilename() { return uploadFilename; }
         };
         HttpHeaders fileHeaders = new HttpHeaders();
-        fileHeaders.setContentType(MediaType.parseMediaType(image.getContentType()));
+        fileHeaders.setContentType(MediaType.parseMediaType(contentType));
         MultiValueMap<String, Object> payload = new LinkedMultiValueMap<>();
         payload.add("image", new HttpEntity<>(bytes, fileHeaders));
         payload.add("source", source);
@@ -79,8 +81,8 @@ public class ScanService {
         headers.setContentType(MediaType.MULTIPART_FORM_DATA);
         AiResult output;
         try {
-            ResponseEntity<AiResult> response = client.exchange(
-                aiUrl + "/predict", HttpMethod.POST, new HttpEntity<>(payload, headers), AiResult.class);
+            ResponseEntity<AiResult> response = client.postForEntity(
+                aiUrl + "/predict", new HttpEntity<>(payload, headers), AiResult.class);
             output = response.getBody();
         } catch (HttpStatusCodeException ex) {
             log.warn("AI service rejected scan {} with status {}: {}", id, ex.getStatusCode(), ex.getResponseBodyAsString());
@@ -97,13 +99,33 @@ public class ScanService {
                 "AI service is unreachable inside Docker at " + aiUrl + ". Check docker compose logs ai.");
         }
         if (output == null || !id.equals(output.requestId()) ||
-                !Set.of("REAL", "FAKE", "REJECTED").contains(output.status())) {
+                !source.equals(output.source()) || output.status() == null ||
+                !Set.of("REAL", "FAKE", "REJECTED").contains(output.status()) ||
+                (output.denomination() != null && (!Set.of(500, 1000).contains(output.denomination()) || "REJECTED".equals(output.status()))) ||
+                (output.confidence() != null && (!Double.isFinite(output.confidence()) || output.confidence() < 0 || output.confidence() > 1))) {
             throw new ResponseStatusException(HttpStatus.BAD_GATEWAY, "Invalid reply from AI service");
         }
         ScanRecord record = repository.save(ScanRecord.of(output, filename));
-        log.info("SCAN {} | {} | denomination={} | confidence={} | source={}",
-            record.getId(), record.getStatus(), record.getDenomination(), record.getConfidence(), source);
+        log.info("SCAN {} | {} | denomination={} | confidence={} | source={} | path={} | boxes={} | candidates={} | threshold={} | fakeProbability={}",
+            record.getId(), record.getStatus(), record.getDenomination(), record.getConfidence(), source, record.getInferencePath(),
+            record.getDetectorBoxCount(), record.getCandidateCount(), record.getThreshold(), record.getFakeProbability());
         return record;
+    }
+
+    public ResponseEntity<byte[]> historyImage(String id) {
+        try {
+            String safeId = UUID.fromString(id).toString();
+            byte[] bytes = statusClient.getForObject(aiUrl + "/history-image/" + safeId, byte[].class);
+            if (bytes == null || bytes.length == 0) {
+                throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Image unavailable");
+            }
+            return ResponseEntity.ok().contentType(MediaType.parseMediaType("image/jpeg"))
+                .header(HttpHeaders.CACHE_CONTROL, "no-store").body(bytes);
+        } catch (IllegalArgumentException | HttpStatusCodeException ex) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Image unavailable");
+        } catch (ResourceAccessException ex) {
+            throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "Image service unavailable");
+        }
     }
 
     public Map<String, Object> systemStatus() {

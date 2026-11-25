@@ -21,10 +21,15 @@ services:
     restart: unless-stopped
     init: true
     environment:
-      BANKNOTE_MODEL_PATH: /app/models/best_efficientnetb0.pkl
+      BANKNOTE_MODEL_PATH: /app/models/best_efficientnetb0_3class.keras
       YOLO_WEIGHTS_PATH: /app/models/banknotes_yolo.pt
       STORAGE_DIR: /app/storage
       YOLO_CONFIDENCE: "0.35"
+      FULL_IMAGE_MIN_CONFIDENCE: "0.70"
+      CLASSIFIER_RESIZE_METHOD: "NEAREST"
+      VERIFY_MULTIPLE_NOTES: "false" # legacy detector is not validated for full-note counting
+      MULTI_BOX_MIN_CONFIDENCE: "0.90"
+      MULTI_CLASS_MIN_CONFIDENCE: "0.85"
       OMP_NUM_THREADS: "2"
       OPENBLAS_NUM_THREADS: "1"
       MKL_NUM_THREADS: "2"
@@ -61,7 +66,9 @@ services:
       - "8081:8081"
 
   web:
-    build: ./frontend
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
     restart: unless-stopped
     depends_on:
       - backend

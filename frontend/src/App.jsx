@@ -1,13 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
 import { Camera, Check, Clock3, History, ImagePlus, RefreshCw, ScanLine, Upload, X } from 'lucide-react'
 
-// Local Docker uses relative /api routes through Nginx; Render Static Site uses an absolute backend URL.
-const API_BASE = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '')
-const apiUrl = path => `${API_BASE}${path}`
-
 const ACCEPTED = new Set(['image/jpeg', 'image/png', 'image/webp'])
 const percent = value => value == null ? '—' : `${(Number(value) * 100).toFixed(1)}%`
 const dateLabel = value => value ? new Date(value).toLocaleString() : '—'
+const needsReview = item => item.status === 'REJECTED' && String(item.inferencePath || '').startsWith('review_')
+const typeLabel = item => needsReview(item) ? 'Unverified' : item.status === 'REJECTED' ? 'Invalid' : 'Banknote'
+const statusLabel = item => needsReview(item) ? 'UNCERTAIN' : item.status === 'REJECTED' ? 'INVALID' : item.status
 const shortId = value => value ? String(value).slice(0, 8).toUpperCase() : '—'
 
 export default function App() {
@@ -22,6 +21,9 @@ export default function App() {
   const [error, setError] = useState('')
   const [system, setSystem] = useState(null)
   const [history, setHistory] = useState([])
+  const [clearing, setClearing] = useState(false)
+  const [historyError, setHistoryError] = useState('')
+  const historyVersion = useRef(0)
   const inputRef = useRef(null)
   const videoRef = useRef(null)
   const streamRef = useRef(null)
@@ -117,7 +119,7 @@ export default function App() {
 
   const refreshSystem = async () => {
     try {
-      const response = await fetch(apiUrl('/api/system'), { cache: 'no-store' })
+      const response = await fetch('/api/system', { cache: 'no-store' })
       if (!response.ok) throw new Error(`Backend returned ${response.status}`)
       const data = await response.json()
       setSystem(data)
@@ -130,13 +132,28 @@ export default function App() {
   }
 
   const refreshHistory = async () => {
+    const version = historyVersion.current
     try {
-      const response = await fetch(apiUrl('/api/scans'), { cache: 'no-store' })
+      const response = await fetch('/api/scans', { cache: 'no-store' })
       if (response.ok) {
         const data = await response.json()
-        if (Array.isArray(data)) setHistory(data)
+        if (Array.isArray(data) && version === historyVersion.current) setHistory(data)
       }
     } catch { /* Preserve the last known history on brief outages. */ }
+  }
+
+  const clearHistory = async () => {
+    if (busy || clearing || !window.confirm('Clear all scan history?')) return
+    setClearing(true)
+    setHistoryError('')
+    historyVersion.current += 1
+    try {
+      const response = await fetch('/api/scans', { method: 'DELETE' })
+      if (!response.ok) throw new Error(`Could not clear history (${response.status})`)
+      historyVersion.current += 1
+      setHistory([])
+    } catch (err) { setHistoryError(err.message) }
+    finally { setClearing(false) }
   }
 
   const refresh = () => Promise.all([refreshSystem(), refreshHistory()])
@@ -152,7 +169,7 @@ export default function App() {
   }, [])
 
   const analyze = async () => {
-    if (!file || busy) return
+    if (!file || busy || clearing) return
     setBusy(true)
     setError('')
     setResult(null)
@@ -160,13 +177,13 @@ export default function App() {
     body.append('image', file)
     body.append('source', source)
     try {
-      const response = await fetch(apiUrl('/api/scans'), { method: 'POST', body })
+      const response = await fetch('/api/scans', { method: 'POST', body })
       let data = {}
       try { data = await response.json() } catch {}
       if (!response.ok) {
         const detail = data.error || data.detail || data.message || `Request failed (${response.status})`
         throw new Error(response.status === 403
-          ? `Request forbidden (403). Check backend APP_CORS_ORIGINS for the active frontend URL. ${detail}`
+          ? `Request forbidden (403). Check backend CORS for localhost:5174. ${detail}`
           : detail)
       }
       setResult(data)
@@ -195,21 +212,19 @@ export default function App() {
     <div className="app-shell">
       <header className="topbar">
         <a className="wordmark" href="#scanner" aria-label="BankNoteGuard">
-          <span className="wordmark-icon">B</span>
+          <img className="wordmark-icon" src="/taka-logo.svg" alt="" aria-hidden="true" />
           <span>BANKNOTE GUARD</span>
         </a>
         <nav className="navigation" aria-label="Main navigation">
           <a href="#scanner">Scanner</a>
           <a href="#history">History</a>
         </nav>
-        <span className={`system-indicator ${aiReady ? 'ready' : ''}`} title={aiReady ? 'AI ready' : 'AI unavailable'} aria-label={aiReady ? 'AI ready' : 'AI unavailable'} />
       </header>
 
       <main className="main-content">
         <section className="scanner-section" id="scanner">
           <div className="section-heading">
             <h1>Scanner</h1>
-            <span className={`readiness ${aiReady ? 'ready' : ''}`} title={aiReady ? 'AI ready' : 'AI unavailable'} />
           </div>
 
           <div
@@ -258,7 +273,7 @@ export default function App() {
             <button
               className="control-button primary"
               onClick={cameraOn ? capture : analyze}
-              disabled={cameraOn ? false : (!file || busy)}
+              disabled={cameraOn ? false : (!file || busy || clearing)}
             >
               {cameraOn ? <Check size={18} /> : <ScanLine size={18} />}
               {cameraOn ? 'Capture' : busy ? 'Scanning' : 'Analyze'}
@@ -271,8 +286,8 @@ export default function App() {
           {result && (
             <section className={`scan-result ${String(result.status).toLowerCase()}`} aria-live="polite">
               <div className="result-primary">
-                <strong>{result.status}</strong>
-                <span>{result.status === 'REJECTED' ? (result.reason || 'Not detected') : (result.denomination ? `৳${Number(result.denomination).toLocaleString()}` : 'Banknote')}</span>
+                <strong>{statusLabel(result)}</strong>
+                <span>{result.status === 'REJECTED' ? (result.reason || 'Not detected') : typeLabel(result)}</span>
               </div>
               <div className="result-meta">
                 <span>{result.confidence == null ? '—' : percent(result.confidence)}</span>
@@ -286,15 +301,18 @@ export default function App() {
         <section className="history-section" id="history">
           <div className="history-heading">
             <h2>History</h2>
-            <button className="refresh-button" onClick={refresh} aria-label="Refresh history" title="Refresh history">
+            <div className="history-actions"><button className="clear-history-button" disabled={busy || clearing} onClick={clearHistory}>{clearing ? 'Clearing…' : 'Clear History'}</button>
+            <button className="refresh-button" disabled={clearing} onClick={refresh} aria-label="Refresh history" title="Refresh history">
               <RefreshCw size={17} />
-            </button>
+            </button></div>
           </div>
 
+          {historyError && <div className="inline-message" role="alert">{historyError}</div>}
           <div className="history-table">
             <div className="history-header-row">
               <span>DATE</span>
               <span>TYPE</span>
+              <span>IMAGE</span>
               <span>RESULT</span>
               <span>CONFIDENCE</span>
               <span>TIME</span>
@@ -302,8 +320,9 @@ export default function App() {
             {history.length ? history.map(item => (
               <div className="history-row" key={item.id}>
                 <time>{dateLabel(item.createdAt)}</time>
-                <span>{item.denomination ? `৳${Number(item.denomination).toLocaleString()}` : 'Banknote'}</span>
-                <strong>{item.status}</strong>
+                <span>{typeLabel(item)}</span>
+                <div className="history-thumbnail"><img src={`/api/scans/${encodeURIComponent(item.id)}/image`} alt="Scanned note" loading="lazy" onError={event => { event.currentTarget.hidden = true; event.currentTarget.nextElementSibling.hidden = false }} /><span hidden>Unavailable</span></div>
+                <strong>{statusLabel(item)}</strong>
                 <span>{percent(item.confidence)}</span>
                 <span>{item.durationMs == null ? '—' : `${item.durationMs} ms`}</span>
               </div>

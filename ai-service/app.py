@@ -1,7 +1,6 @@
 """BankNoteGuard AI: single-class YOLO banknote detector + EfficientNet-B0 classifier."""
 from __future__ import annotations
 
-import hashlib
 from contextlib import asynccontextmanager
 import io
 import logging
@@ -20,14 +19,25 @@ from pathlib import Path
 
 import numpy as np
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.responses import Response
 from PIL import Image, ImageOps, UnidentifiedImageError
+from denomination import recognize_denomination
 
 BASE = Path(__file__).resolve().parent
-MODEL_PATH = Path(os.getenv("BANKNOTE_MODEL_PATH", str(BASE / "models/best_efficientnetb0.pkl")))
+MODEL_PATH = Path(os.getenv("BANKNOTE_MODEL_PATH", str(BASE / "models/best_efficientnetb0_3class.keras")))
 YOLO_PATH = Path(os.getenv("YOLO_WEIGHTS_PATH", str(BASE / "models/banknotes_yolo.pt")))
 STORAGE = Path(os.getenv("STORAGE_DIR", str(BASE / "storage")))
-DETECT_CONF = float(os.getenv("YOLO_CONFIDENCE", "0.60"))
+DETECT_CONF = float(os.getenv("YOLO_CONFIDENCE", "0.35"))
 MIN_NOTE_AREA = float(os.getenv("MIN_NOTE_AREA_RATIO", "0.08"))
+FULL_IMAGE_MIN_CONF = float(os.getenv("FULL_IMAGE_MIN_CONFIDENCE", "0.70"))
+RESIZE_METHOD = os.getenv("CLASSIFIER_RESIZE_METHOD", "NEAREST").upper()
+if RESIZE_METHOD not in {"NEAREST", "LANCZOS"}:
+    raise ValueError("CLASSIFIER_RESIZE_METHOD must be NEAREST or LANCZOS")
+if not 0.5 <= FULL_IMAGE_MIN_CONF <= 1.0:
+    raise ValueError("FULL_IMAGE_MIN_CONFIDENCE must be between 0.5 and 1.0")
+VERIFY_MULTIPLE_NOTES = os.getenv("VERIFY_MULTIPLE_NOTES", "false").lower() in {"true", "1", "yes"}
+MULTI_BOX_MIN_CONF = float(os.getenv("MULTI_BOX_MIN_CONFIDENCE", "0.90"))
+MULTI_CLASS_MIN_CONF = float(os.getenv("MULTI_CLASS_MIN_CONFIDENCE", "0.85"))
 MAX_SIZE = 10 * 1024 * 1024
 DENOMINATION_NAMES = {"500_taka": 500, "1000_taka": 1000}
 SINGLE_CLASS_NAME = "banknote"
@@ -109,32 +119,7 @@ async def lifespan(_app):
         except subprocess.TimeoutExpired:
             WORKER_PROCESS.kill()
 
-app = FastAPI(title="BankNoteGuard AI Service", version="2.2.0", lifespan=lifespan)
-
-
-class PlainDataUnpickler(pickle.Unpickler):
-    """Load only plain data from the supplied inference bundle."""
-    def find_class(self, module, name):
-        raise pickle.UnpicklingError("Executable types are forbidden in the model bundle")
-
-
-def load_bundle_metadata():
-    if not MODEL_PATH.is_file():
-        raise FileNotFoundError(f"EfficientNet bundle missing: {MODEL_PATH}")
-    with MODEL_PATH.open("rb") as stream:
-        data = PlainDataUnpickler(stream).load()
-    if data.get("bundle_format") != "efficientnetb0_banknote_inference_v1":
-        raise ValueError("Unsupported EfficientNet bundle format")
-    if data.get("class_to_label") != {"real_notes": 0, "fake_notes": 1}:
-        raise ValueError("Unexpected EfficientNet class labels")
-    if data.get("positive_label") != 1:
-        raise ValueError("Expected positive label fake_notes = 1")
-    if data.get("preprocessing", {}).get("pixel_range") != "0_to_255":
-        raise ValueError("Unexpected EfficientNet preprocessing")
-    model_bytes = data.get("keras_model_bytes")
-    if not isinstance(model_bytes, bytes) or hashlib.sha256(model_bytes).hexdigest() != data.get("keras_sha256"):
-        raise ValueError("Keras checkpoint checksum mismatch")
-    return data
+app = FastAPI(title="BankNoteGuard AI Service", version="8.0.0", lifespan=lifespan)
 
 
 def normalize_names(names):
@@ -180,27 +165,29 @@ def get_detector():
 
 
 def classify_note(cropped: Image.Image):
-    """Send only the cropped note to TensorFlow's isolated loopback-only worker."""
+    """Send a resized crop or full image to the isolated classifier."""
     buffer = io.BytesIO()
-    cropped.convert('RGB').save(buffer, format='PNG')
+    cropped.convert('RGB').resize((224, 224), Image.Resampling[RESIZE_METHOD]).save(buffer, format='PNG')
     request = Request(WORKER_URL + '/classify', data=buffer.getvalue(),
                       headers={'Content-Type': 'image/png'}, method='POST')
     try:
-        with urlopen(request, timeout=90) as response:
+        with urlopen(request, timeout=60) as response:
             result = json.load(response)
     except (OSError, ValueError, TimeoutError) as exc:
         raise RuntimeError('EfficientNet worker inference unavailable: ' + str(exc)) from exc
-    if result.get('status') not in ('REAL', 'FAKE'):
+    if result.get('status') not in ('REAL', 'FAKE', 'REJECTED'):
         raise ValueError('Invalid classifier worker result')
     return result
 
 
-def detect_note(img: Image.Image):
+def detect_candidates(img: Image.Image):
     detector = get_detector()
     names = normalize_names(detector.names)
     mode = detector_mode_from_names(detector.names)
-    rgb = np.asarray(img.convert("RGB"))
-    prediction = detector.predict(source=rgb, conf=DETECT_CONF, device="cpu", verbose=False)[0]
+    # Ultralytics treats NumPy image inputs as BGR, unlike Pillow RGB.
+    bgr = np.ascontiguousarray(np.asarray(img.convert("RGB"))[:, :, ::-1])
+    prediction = detector.predict(source=bgr, conf=DETECT_CONF, iou=0.45, agnostic_nms=True,
+                                  max_det=30, device="cpu", verbose=False)[0]
     found = []
     if prediction.boxes is not None:
         for box in prediction.boxes:
@@ -226,11 +213,77 @@ def detect_note(img: Image.Image):
                 "confidence": float(box.conf.item()),
                 "bbox": (x1, y1, x2, y2),
             })
-    if not found:
-        return None, "No banknote was detected. Try a clear image with the full note visible."
-    if len(found) > 1:
-        return None, "More than one banknote was detected. Scan one note at a time."
-    return found[0], None
+    return found
+
+
+def overlap(a, b):
+    x1, y1, x2, y2 = a
+    u1, v1, u2, v2 = b
+    inter = max(0, min(x2, u2)-max(x1, u1))*max(0, min(y2, v2)-max(y1, v1))
+    aa, bb = (x2-x1)*(y2-y1), (u2-u1)*(v2-v1)
+    return inter/(aa+bb-inter), inter/min(aa,bb)
+
+
+def consolidate_candidates(candidates):
+    """Collapse duplicate/contained detections, retaining the best enclosing box."""
+    ordered = sorted(candidates, key=lambda d: d['confidence'], reverse=True)
+    kept = []
+    for candidate in ordered:
+        duplicates = [k for k in kept if overlap(k['bbox'], candidate['bbox'])[0] >= .45
+                      or overlap(k['bbox'], candidate['bbox'])[1] >= .80]
+        if not duplicates:
+            kept.append(dict(candidate))
+            continue
+        # Union avoids losing security features when one box covers only part of a note.
+        # A later box may bridge two prior boxes; collapse both rather than count them twice.
+        group = duplicates + [candidate]
+        for k in duplicates:
+            kept.remove(k)
+        box = (min(k['bbox'][0] for k in group), min(k['bbox'][1] for k in group),
+               max(k['bbox'][2] for k in group), max(k['bbox'][3] for k in group))
+        best = max(group, key=lambda k:k['confidence'])
+        denominations = {k['denomination'] for k in group}
+        kept.append({**best, 'bbox': box, 'denomination': best['denomination'] if len(denominations)==1 else None})
+    return sorted(kept, key=lambda d:d['confidence'], reverse=True)
+
+
+def crop_note(img, bbox):
+    x1,y1,x2,y2 = bbox
+    # Include a small border so edge features are not cut off.
+    px, py = round((x2-x1)*.04), round((y2-y1)*.04)
+    return img.crop((max(0,x1-px),max(0,y1-py),min(img.width,x2+px),min(img.height,y2+py)))
+
+
+def plausible_whole_note(candidate):
+    x1,y1,x2,y2 = candidate['bbox']
+    w,h = x2-x1,y2-y1
+    return candidate['confidence'] >= MULTI_BOX_MIN_CONF and 1.5 <= max(w,h)/min(w,h) <= 3.2
+
+
+def confident_note(result, threshold):
+    confidence = result.get('confidence')
+    return (result.get('status') in ('REAL', 'FAKE')
+            and isinstance(confidence, (int, float))
+            and threshold <= confidence <= 1.0)
+
+
+def confirmed_multiple(img, candidates):
+    """Only reject for multiple notes when distinct whole-note-like crops agree.
+
+    Box count alone cannot tell fragments of one note from separate notes.
+    Restrict verification to three plausible boxes to bound CPU inference latency.
+    """
+    strong = [c for c in candidates if plausible_whole_note(c)][:3]
+    verified = []
+    for c in strong:
+        if not any(overlap(c['bbox'], other['bbox'])[1] <= .10 for other in strong if other is not c):
+            continue
+        result = classify_note(crop_note(img,c['bbox']))
+        if confident_note(result, MULTI_CLASS_MIN_CONF):
+            if any(overlap(c['bbox'], other['bbox'])[1] <= .10 for other in verified):
+                return True
+            verified.append(c)
+    return False
 
 
 def archive_result(result: dict):
@@ -249,35 +302,128 @@ def process_image(img: Image.Image, request_id: str, source: str) -> dict:
         return _process_image_locked(img, request_id, source, started)
 
 
+def verify_prediction(img, candidates, request_id):
+    """Conservative multi-view inference: never select a label by maximum confidence.
+
+    Full-image REAL remains primary; FAKE and uncertain decisions need corroboration.
+    Alternate resampling is not independent evidence of authenticity. The policy is
+    provisional until tested on a representative, independent banknote set.
+    """
+    views = []
+    def predict_view(name, image):
+        result = classify_note(image)
+        views.append((name, result))
+        LOG.info("VIEW id=%s name=%s status=%s confidence=%s probabilities=%s",
+                 request_id, name, result['status'], result.get('confidence'),
+                 result.get('probabilities'))
+        return result
+
+    primary = predict_view('original_' + RESIZE_METHOD.lower(), img)
+    threshold = FULL_IMAGE_MIN_CONF
+    # Preserve confident original REAL results. Do not rotate square close-ups.
+    if primary['status'] == 'REAL' and confident_note(primary, threshold):
+        return primary, 'full_image_primary', views
+
+    # A second resize can expose a fragile result without modifying source content.
+    predict_view('original_bilinear', img.resize((224, 224), Image.Resampling.BILINEAR))
+    # A third view uses a detector crop only when it covers most of the upload.
+    # Otherwise use bicubic interpolation of the original, not an arbitrary fragment.
+    if len(candidates) == 1:
+        x1, y1, x2, y2 = candidates[0]['bbox']
+        coverage = (x2-x1)*(y2-y1)/(img.width*img.height)
+    else:
+        coverage = 0.0
+    if coverage >= .55 and coverage < .96:
+        predict_view('large_detector_crop', crop_note(img, candidates[0]['bbox']))
+    else:
+        predict_view('original_bicubic', img.resize((224,224), Image.Resampling.BICUBIC))
+
+    # Only inspect quarter-turns for clearly portrait-shaped notes. Both directions
+    # are tested; do not cherry-pick the one with the largest score. Partial square
+    # crops keep their original orientation.
+    if img.height / img.width >= 1.65 and primary['status'] != 'REJECTED':
+        predict_view('rotate_90', img.transpose(Image.Transpose.ROTATE_90))
+        predict_view('rotate_270', img.transpose(Image.Transpose.ROTATE_270))
+
+    original_views = views[:3]
+    strong = {label: [r for _, r in original_views if r['status'] == label
+                      and (r.get('confidence') or 0) >= threshold]
+              for label in ('REAL', 'FAKE', 'REJECTED')}
+    # Any strong competing class makes a definitive result unsafe.
+    # A strong non-note result is never rescued by an isolated crop.
+    if (primary['status'] == 'REJECTED' and (primary.get('confidence') or 0) >= threshold
+            and len(strong['REJECTED']) >= 2 and not strong['REAL'] and not strong['FAKE']):
+        return strong['REJECTED'][0], 'non_banknote_confirmed', views
+    for label, opposite in [('REAL','FAKE'), ('FAKE','REAL')]:
+        if (primary['status'] == label and confident_note(primary, threshold)
+                and len(strong[label]) >= 2 and not strong[opposite] and not strong['REJECTED']):
+            rotated = [r for _, r in views[3:]]
+            if len(rotated) == 2 and all(r['status'] == opposite and confident_note(r, threshold) for r in rotated):
+                break
+            # Use the mean confidence of agreeing predictions, not the maximum.
+            # Keep the actual mean FAKE softmax score for audit.
+            agreeing = strong[label]
+            result = dict(agreeing[0])
+            result['confidence'] = round(sum(r['confidence'] for r in agreeing)/len(agreeing), 6)
+            fake_scores = [r.get('fakeProbability') for r in agreeing]
+            if all(v is not None for v in fake_scores):
+                result['fakeProbability'] = round(sum(fake_scores)/len(fake_scores), 6)
+            result.pop('probabilities', None)
+            return result, 'multi_view_verified', views
+    return dict(status='REJECTED', confidence=None, fakeProbability=primary.get('fakeProbability'),
+                reason='Prediction uncertain or conflicting. Rescan in good lighting; authenticity is not established.'), 'review_uncertain', views
+
+
 def _process_image_locked(img: Image.Image, request_id: str, source: str, started: float) -> dict:
-    detection, reason = detect_note(img)
+    raw = detect_candidates(img)
+    candidates = consolidate_candidates(raw)
     response = {
-        "requestId": request_id,
-        "source": source,
-        "status": "REJECTED",
-        "denomination": None,
-        "confidence": None,
-        "fakeProbability": None,
+        "requestId": request_id, "source": source, "status": "REJECTED",
+        "denomination": None, "confidence": None, "fakeProbability": None,
         "threshold": None,
-        "detectorConfidence": None,
-        "reason": reason,
-        "durationMs": 0,
+        "detectorConfidence": max((round(c['confidence'], 6) for c in candidates), default=None),
+        "reason": None, "durationMs": 0, "inferencePath": "full_image_primary",
+        "detectorBoxCount": len(raw), "candidateCount": len(candidates),
     }
-    if detection:
-        cropped = img.crop(detection["bbox"])
-        response.update(classify_note(cropped))
-        response["denomination"] = detection["denomination"]
-        response["detectorConfidence"] = round(detection["confidence"], 6)
-        response["reason"] = None
-        cropped_dir = STORAGE / "cropped"
+    selected_image = img
+    if len(candidates) > 1 and VERIFY_MULTIPLE_NOTES and confirmed_multiple(img, candidates):
+        response.update(reason="Multiple separate banknotes detected. Scan one note at a time.",
+                        inferencePath="multiple_confirmed")
+    else:
+        result, path, views = verify_prediction(img, candidates, request_id)
+        # Keep the Java response schema unchanged; detailed view probabilities go into logs.
+        response.update({k:v for k,v in result.items() if k != 'probabilities'},
+                        threshold=FULL_IMAGE_MIN_CONF, inferencePath=path)
+        if response['status'] != 'REJECTED' and len(candidates) == 1:
+            response['denomination'] = candidates[0]['denomination']
+            selected_image = crop_note(img, candidates[0]['bbox'])
+
+    # Finalize ALL inference paths, not just detector_crop.
+    if response['status'] == 'REJECTED':
+        response['denomination'] = None
+        response['reason'] = response['reason'] or 'Image is not a supported banknote.'
+    else:
+        response['reason'] = None
+        if response['denomination'] is None:
+            try:
+                amount = recognize_denomination(selected_image, img)
+                response['denomination'] = amount if amount in (500, 1000) else None
+            except Exception:
+                # OCR is optional; its failure must not erase authenticity.
+                LOG.exception('Denomination OCR failed for %s', request_id)
+            LOG.info('DENOMINATION id=%s source=ocr amount=%s', request_id, response['denomination'])
+        cropped_dir = STORAGE / 'cropped'
         cropped_dir.mkdir(parents=True, exist_ok=True)
-        cropped.save(cropped_dir / f"{request_id}.jpg", format="JPEG", quality=90)
-    response["durationMs"] = round((time.perf_counter() - started) * 1000)
+        selected_image.convert('RGB').save(cropped_dir / f'{request_id}.jpg', format='JPEG', quality=90)
+
+    LOG.info('DETECTION id=%s raw_boxes=%s consolidated=%s path=%s',
+             request_id, len(raw), len(candidates), response['inferencePath'])
+    response['durationMs'] = round((time.perf_counter() - started) * 1000)
     archive_result(response)
     LOG.info(
         "SCAN id=%s source=%s status=%s denomination=%s confidence=%s detector_conf=%s elapsed=%sms",
-        request_id, source, response["status"], response["denomination"],
-        response["confidence"], response["detectorConfidence"], response["durationMs"]
+        request_id, source, response['status'], response['denomination'],
+        response['confidence'], response['detectorConfidence'], response['durationMs'],
     )
     return response
 
@@ -298,10 +444,17 @@ def health():
             status.update(ready=False, classifierReady=False, loading=False,
                           message='EfficientNet worker disconnected; check AI logs',
                           error=worker.get('error') or 'Worker process exited')
+    if status.get('ready'):
+        status['classifierModelSha256'] = worker.get('modelSha256')
+        status['tensorflowVersion'] = worker.get('tensorflowVersion')
     status.update({
         "uptimeSeconds": round(time.time() - START_TIME),
         "classifierBundlePresent": MODEL_PATH.is_file(),
         "yoloWeightsPresent": YOLO_PATH.is_file(),
+        "inferencePolicy": "nearest-primary-v8-conservative-multiview-review",
+        "fullImageMinConfidence": FULL_IMAGE_MIN_CONF,
+        "classifierResizeMethod": RESIZE_METHOD,
+        "verifyMultipleNotes": VERIFY_MULTIPLE_NOTES,
     })
     return status
 
@@ -349,3 +502,15 @@ def predict(image: UploadFile = File(...), source: str = Form("upload"), request
     except Exception:
         LOG.exception("Inference failed for %s", scan_id)
         raise HTTPException(500, "Model inference failed; inspect the AI service log")
+
+
+@app.get('/history-image/{scan_id}')
+def history_image(scan_id: uuid.UUID):
+    path = STORAGE / 'uploads' / f'{scan_id}.jpg'
+    if not path.is_file():
+        raise HTTPException(404, 'Image unavailable')
+    with Image.open(path) as image:
+        image.thumbnail((240, 160))
+        buffer = io.BytesIO()
+        image.convert('RGB').save(buffer, format='JPEG', quality=85)
+    return Response(buffer.getvalue(), media_type='image/jpeg', headers={'Cache-Control': 'no-store'})
