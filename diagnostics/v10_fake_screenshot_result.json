@@ -1,0 +1,15 @@
+{
+  "source": "previous user-labelled FAKE screenshot-derived sample; authenticity not independently verified",
+  "result": {
+    "status": "REJECTED",
+    "confidence": null,
+    "fakeProbability": 0.562381,
+    "probabilities": {
+      "real_notes": 0.060892,
+      "fake_notes": 0.562381,
+      "not_banknotes": 0.376727
+    },
+    "reason": "Prediction uncertain or conflicting. Rescan in good lighting; authenticity is not established."
+  },
+  "path": "review_uncertain"
+}

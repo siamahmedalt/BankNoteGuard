@@ -578,3 +578,22 @@ a {
 .history-header-row, .history-row { grid-template-columns: minmax(100px, 1.2fr) minmax(95px, 1fr) 78px minmax(62px, .7fr) minmax(74px, .8fr) minmax(55px, .6fr); gap: 8px; min-width: 510px; }
 .history-thumbnail img { width: 74px; height: 48px; object-fit: contain; border: 1px solid #ddd; border-radius: 4px; }
 .history-thumbnail span { font-size: 10px; color: #666; }
+
+
+/* V14 scan output: confidence and three-class probability breakdown. */
+.scan-result { display: flex; flex-direction: column; align-items: stretch; gap: 14px; }
+.result-header { display: flex; justify-content: space-between; align-items: center; gap: 14px; }
+.result-header .result-meta { flex-shrink: 0; }
+.prediction-confidence { border-top: 1px solid #ddd; padding-top: 12px; display: grid; gap: 10px; font-size: 12px; }
+.confidence-summary, .confidence-row-label, .confidence-rule { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.confidence-summary { font-size: 13px; }
+.confidence-summary strong { font-size: 20px; }
+.confidence-summary strong, .confidence-row-label strong { font-variant-numeric: tabular-nums; }
+.confidence-breakdown-title { color: #555; font-weight: 600; }
+.confidence-row { display: grid; gap: 5px; }
+.confidence-track { height: 5px; background: #eee; overflow: hidden; }
+.confidence-fill { height: 100%; background: #555; }
+.confidence-row.real .confidence-fill { background: #237343; }
+.confidence-row.fake .confidence-fill { background: #ae3434; }
+.confidence-rule { padding-top: 8px; border-top: 1px solid #e4e4e4; }
+.confidence-note { margin: 0; font-size: 11px; color: #555; line-height: 1.5; }

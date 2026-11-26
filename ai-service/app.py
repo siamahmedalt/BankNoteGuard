@@ -29,15 +29,12 @@ YOLO_PATH = Path(os.getenv("YOLO_WEIGHTS_PATH", str(BASE / "models/banknotes_yol
 STORAGE = Path(os.getenv("STORAGE_DIR", str(BASE / "storage")))
 DETECT_CONF = float(os.getenv("YOLO_CONFIDENCE", "0.35"))
 MIN_NOTE_AREA = float(os.getenv("MIN_NOTE_AREA_RATIO", "0.08"))
-FULL_IMAGE_MIN_CONF = float(os.getenv("FULL_IMAGE_MIN_CONFIDENCE", "0.70"))
-RESIZE_METHOD = os.getenv("CLASSIFIER_RESIZE_METHOD", "NEAREST").upper()
-if RESIZE_METHOD not in {"NEAREST", "LANCZOS"}:
-    raise ValueError("CLASSIFIER_RESIZE_METHOD must be NEAREST or LANCZOS")
-if not 0.5 <= FULL_IMAGE_MIN_CONF <= 1.0:
-    raise ValueError("FULL_IMAGE_MIN_CONFIDENCE must be between 0.5 and 1.0")
-VERIFY_MULTIPLE_NOTES = os.getenv("VERIFY_MULTIPLE_NOTES", "false").lower() in {"true", "1", "yes"}
-MULTI_BOX_MIN_CONF = float(os.getenv("MULTI_BOX_MIN_CONFIDENCE", "0.90"))
-MULTI_CLASS_MIN_CONF = float(os.getenv("MULTI_CLASS_MIN_CONFIDENCE", "0.85"))
+INFERENCE_MODE = os.getenv("CLASSIFIER_INFERENCE_MODE", "direct").lower()
+if INFERENCE_MODE not in {"direct", "consensus"}:
+    raise ValueError("CLASSIFIER_INFERENCE_MODE must be direct or consensus")
+RESIZE_METHOD = os.getenv("CLASSIFIER_RESIZE_METHOD", "BILINEAR").upper()
+if RESIZE_METHOD != "BILINEAR":
+    raise ValueError("CLASSIFIER_RESIZE_METHOD must be BILINEAR to match training")
 MAX_SIZE = 10 * 1024 * 1024
 DENOMINATION_NAMES = {"500_taka": 500, "1000_taka": 1000}
 SINGLE_CLASS_NAME = "banknote"
@@ -78,7 +75,7 @@ def _bootstrap_models():
         WORKER_PROCESS = subprocess.Popen([
             sys.executable, '-m', 'uvicorn', 'classifier_worker:app',
             '--host', '127.0.0.1', '--port', '8002', '--workers', '1'
-        ], cwd=str(BASE), stdout=None, stderr=None)
+        ], cwd=str(BASE), stdout=None, stderr=None, env={**os.environ, "KERAS_BACKEND": "tensorflow"})
         detector = get_detector()
         names = normalize_names(detector.names)
         mode = detector_mode_from_names(detector.names)
@@ -119,7 +116,7 @@ async def lifespan(_app):
         except subprocess.TimeoutExpired:
             WORKER_PROCESS.kill()
 
-app = FastAPI(title="BankNoteGuard AI Service", version="8.0.0", lifespan=lifespan)
+app = FastAPI(title="BankNoteGuard AI Service", version="16.0.0", lifespan=lifespan)
 
 
 def normalize_names(names):
@@ -165,11 +162,16 @@ def get_detector():
 
 
 def classify_note(cropped: Image.Image):
-    """Send a resized crop or full image to the isolated classifier."""
+    """Transport original RGB pixels losslessly; resize only in TensorFlow worker."""
     buffer = io.BytesIO()
-    cropped.convert('RGB').resize((224, 224), Image.Resampling[RESIZE_METHOD]).save(buffer, format='PNG')
-    request = Request(WORKER_URL + '/classify', data=buffer.getvalue(),
-                      headers={'Content-Type': 'image/png'}, method='POST')
+    cropped.convert('RGB').save(buffer, format='PNG', compress_level=1)
+    return classify_original_bytes(buffer.getvalue(), 'image/png')
+
+
+def classify_original_bytes(raw: bytes, content_type: str):
+    """Reference Flask app's direct decode path, without Pillow re-encoding."""
+    request = Request(WORKER_URL + '/classify', data=raw,
+                      headers={'Content-Type': content_type}, method='POST')
     try:
         with urlopen(request, timeout=60) as response:
             result = json.load(response)
@@ -254,38 +256,6 @@ def crop_note(img, bbox):
     return img.crop((max(0,x1-px),max(0,y1-py),min(img.width,x2+px),min(img.height,y2+py)))
 
 
-def plausible_whole_note(candidate):
-    x1,y1,x2,y2 = candidate['bbox']
-    w,h = x2-x1,y2-y1
-    return candidate['confidence'] >= MULTI_BOX_MIN_CONF and 1.5 <= max(w,h)/min(w,h) <= 3.2
-
-
-def confident_note(result, threshold):
-    confidence = result.get('confidence')
-    return (result.get('status') in ('REAL', 'FAKE')
-            and isinstance(confidence, (int, float))
-            and threshold <= confidence <= 1.0)
-
-
-def confirmed_multiple(img, candidates):
-    """Only reject for multiple notes when distinct whole-note-like crops agree.
-
-    Box count alone cannot tell fragments of one note from separate notes.
-    Restrict verification to three plausible boxes to bound CPU inference latency.
-    """
-    strong = [c for c in candidates if plausible_whole_note(c)][:3]
-    verified = []
-    for c in strong:
-        if not any(overlap(c['bbox'], other['bbox'])[1] <= .10 for other in strong if other is not c):
-            continue
-        result = classify_note(crop_note(img,c['bbox']))
-        if confident_note(result, MULTI_CLASS_MIN_CONF):
-            if any(overlap(c['bbox'], other['bbox'])[1] <= .10 for other in verified):
-                return True
-            verified.append(c)
-    return False
-
-
 def archive_result(result: dict):
     """Append plain prediction metadata; never modify either trained model."""
     target = STORAGE / "prediction_results.pkl"
@@ -296,107 +266,106 @@ def archive_result(result: dict):
         os.fsync(stream.fileno())
 
 
-def process_image(img: Image.Image, request_id: str, source: str) -> dict:
+def process_image(img: Image.Image, request_id: str, source: str, original=None) -> dict:
     started = time.perf_counter()
     with INFERENCE_LOCK:
-        return _process_image_locked(img, request_id, source, started)
+        return _process_image_locked(img, request_id, source, started, original)
+
+
+def stability_views(img):
+    """Fixed, rotation-closed views; never use detector patches for authenticity.
+
+    Symmetric integer margins commute with quarter-turns. Mild trim is a
+    robustness probe, not evidence that missing security features are genuine.
+    """
+    img = img.convert('RGB')
+    dx, dy = img.width // 20, img.height // 20
+    trimmed = img.crop((dx, dy, img.width-dx, img.height-dy))
+    turns = (None, Image.Transpose.ROTATE_90, Image.Transpose.ROTATE_180,
+             Image.Transpose.ROTATE_270)
+    return [(f'{family}_{angle}', base if turn is None else base.transpose(turn))
+            for family, base in (('full', img), ('trim', trimmed))
+            for angle, turn in zip((0, 90, 180, 270), turns)]
+
+
+def argmax_result(probabilities):
+    """Select the largest of the three trained scores; ties use class ID order."""
+    names = ('real_notes', 'fake_notes', 'not_banknotes')
+    values = np.asarray([probabilities[name] for name in names], dtype=float)
+    if (not np.all(np.isfinite(values)) or np.any(values < 0) or np.any(values > 1)
+            or not np.isclose(values.sum(), 1, atol=1e-3)):
+        raise ValueError('Invalid classifier probabilities')
+    winner = int(np.argmax(values))
+    return dict(status=('REAL', 'FAKE', 'REJECTED')[winner],
+                confidence=float(values[winner]), fakeProbability=float(values[1]),
+                probabilities=dict(zip(names, map(float, values))), threshold=None,
+                reason='Image is not a supported banknote.' if winner == 2 else None)
+
+
+def aggregate_stability(results):
+    """Optional eight-view mean, with argmax only (no rejection by vote or threshold)."""
+    from math import fsum
+    names = ('real_notes', 'fake_notes', 'not_banknotes')
+    if len(results) != 8:
+        raise ValueError('Expected four full and four trimmed views')
+    rows = [argmax_result(r['probabilities'])['probabilities'] for r in results]
+    mean = {name: fsum(row[name] for row in rows) / len(rows) for name in names}
+    return argmax_result(mean), 'rotation_average_argmax'
 
 
 def verify_prediction(img, candidates, request_id):
-    """Conservative multi-view inference: never select a label by maximum confidence.
-
-    Full-image REAL remains primary; FAKE and uncertain decisions need corroboration.
-    Alternate resampling is not independent evidence of authenticity. The policy is
-    provisional until tested on a representative, independent banknote set.
-    """
+    """Optional rotation-closed eight-view average; YOLO is localization only."""
     views = []
-    def predict_view(name, image):
+    for name, image in stability_views(img):
         result = classify_note(image)
         views.append((name, result))
-        LOG.info("VIEW id=%s name=%s status=%s confidence=%s probabilities=%s",
-                 request_id, name, result['status'], result.get('confidence'),
-                 result.get('probabilities'))
-        return result
-
-    primary = predict_view('original_' + RESIZE_METHOD.lower(), img)
-    threshold = FULL_IMAGE_MIN_CONF
-    # Preserve confident original REAL results. Do not rotate square close-ups.
-    if primary['status'] == 'REAL' and confident_note(primary, threshold):
-        return primary, 'full_image_primary', views
-
-    # A second resize can expose a fragile result without modifying source content.
-    predict_view('original_bilinear', img.resize((224, 224), Image.Resampling.BILINEAR))
-    # A third view uses a detector crop only when it covers most of the upload.
-    # Otherwise use bicubic interpolation of the original, not an arbitrary fragment.
-    if len(candidates) == 1:
-        x1, y1, x2, y2 = candidates[0]['bbox']
-        coverage = (x2-x1)*(y2-y1)/(img.width*img.height)
-    else:
-        coverage = 0.0
-    if coverage >= .55 and coverage < .96:
-        predict_view('large_detector_crop', crop_note(img, candidates[0]['bbox']))
-    else:
-        predict_view('original_bicubic', img.resize((224,224), Image.Resampling.BICUBIC))
-
-    # Only inspect quarter-turns for clearly portrait-shaped notes. Both directions
-    # are tested; do not cherry-pick the one with the largest score. Partial square
-    # crops keep their original orientation.
-    if img.height / img.width >= 1.65 and primary['status'] != 'REJECTED':
-        predict_view('rotate_90', img.transpose(Image.Transpose.ROTATE_90))
-        predict_view('rotate_270', img.transpose(Image.Transpose.ROTATE_270))
-
-    original_views = views[:3]
-    strong = {label: [r for _, r in original_views if r['status'] == label
-                      and (r.get('confidence') or 0) >= threshold]
-              for label in ('REAL', 'FAKE', 'REJECTED')}
-    # Any strong competing class makes a definitive result unsafe.
-    # A strong non-note result is never rescued by an isolated crop.
-    if (primary['status'] == 'REJECTED' and (primary.get('confidence') or 0) >= threshold
-            and len(strong['REJECTED']) >= 2 and not strong['REAL'] and not strong['FAKE']):
-        return strong['REJECTED'][0], 'non_banknote_confirmed', views
-    for label, opposite in [('REAL','FAKE'), ('FAKE','REAL')]:
-        if (primary['status'] == label and confident_note(primary, threshold)
-                and len(strong[label]) >= 2 and not strong[opposite] and not strong['REJECTED']):
-            rotated = [r for _, r in views[3:]]
-            if len(rotated) == 2 and all(r['status'] == opposite and confident_note(r, threshold) for r in rotated):
-                break
-            # Use the mean confidence of agreeing predictions, not the maximum.
-            # Keep the actual mean FAKE softmax score for audit.
-            agreeing = strong[label]
-            result = dict(agreeing[0])
-            result['confidence'] = round(sum(r['confidence'] for r in agreeing)/len(agreeing), 6)
-            fake_scores = [r.get('fakeProbability') for r in agreeing]
-            if all(v is not None for v in fake_scores):
-                result['fakeProbability'] = round(sum(fake_scores)/len(fake_scores), 6)
-            result.pop('probabilities', None)
-            return result, 'multi_view_verified', views
-    return dict(status='REJECTED', confidence=None, fakeProbability=primary.get('fakeProbability'),
-                reason='Prediction uncertain or conflicting. Rescan in good lighting; authenticity is not established.'), 'review_uncertain', views
+        LOG.info('VIEW id=%s name=%s status=%s confidence=%s probabilities=%s',
+                 request_id, name, result['status'], result.get('confidence'), result.get('probabilities'))
+    result, path = aggregate_stability([r for _, r in views])
+    LOG.info('AVERAGE id=%s path=%s probabilities=%s', request_id, path, result['probabilities'])
+    return result, path, views
 
 
-def _process_image_locked(img: Image.Image, request_id: str, source: str, started: float) -> dict:
+def direct_prediction(img, request_id, original=None):
+    """Reference app single-image prediction; no minimum confidence or review guard."""
+    raw = classify_original_bytes(*original) if original is not None else classify_note(img)
+    result = argmax_result(raw['probabilities'])
+    LOG.info('DIRECT id=%s input=%s argmax=%s score=%s probabilities=%s',
+             request_id, 'original_bytes' if original is not None else 'rgb_png',
+             result['status'], result['confidence'], result['probabilities'])
+    return result, 'reference_direct', [('original', raw)]
+
+
+def classify_for_policy(img, candidates, request_id, original=None):
+    if INFERENCE_MODE == 'direct':
+        return direct_prediction(img, request_id, original)
+    return verify_prediction(img, candidates, request_id)
+
+
+def _process_image_locked(img: Image.Image, request_id: str, source: str, started: float, original=None) -> dict:
     raw = detect_candidates(img)
     candidates = consolidate_candidates(raw)
     response = {
         "requestId": request_id, "source": source, "status": "REJECTED",
         "denomination": None, "confidence": None, "fakeProbability": None,
+        "realProbability": None, "invalidProbability": None,
         "threshold": None,
         "detectorConfidence": max((round(c['confidence'], 6) for c in candidates), default=None),
-        "reason": None, "durationMs": 0, "inferencePath": "full_image_primary",
+        "reason": None, "durationMs": 0, "inferencePath": "reference_direct",
         "detectorBoxCount": len(raw), "candidateCount": len(candidates),
     }
     selected_image = img
-    if len(candidates) > 1 and VERIFY_MULTIPLE_NOTES and confirmed_multiple(img, candidates):
-        response.update(reason="Multiple separate banknotes detected. Scan one note at a time.",
-                        inferencePath="multiple_confirmed")
-    else:
-        result, path, views = verify_prediction(img, candidates, request_id)
-        # Keep the Java response schema unchanged; detailed view probabilities go into logs.
-        response.update({k:v for k,v in result.items() if k != 'probabilities'},
-                        threshold=FULL_IMAGE_MIN_CONF, inferencePath=path)
-        if response['status'] != 'REJECTED' and len(candidates) == 1:
-            response['denomination'] = candidates[0]['denomination']
-            selected_image = crop_note(img, candidates[0]['bbox'])
+    result, path, views = classify_for_policy(img, candidates, request_id, original)
+    # Localization cannot override the classifier's highest-probability class.
+    probabilities = result['probabilities']
+    response.update({k:v for k,v in result.items() if k != 'probabilities'},
+                    realProbability=probabilities['real_notes'],
+                    fakeProbability=probabilities['fake_notes'],
+                    invalidProbability=probabilities['not_banknotes'],
+                    threshold=None, inferencePath=path)
+    if response['status'] != 'REJECTED' and len(candidates) == 1:
+        response['denomination'] = candidates[0]['denomination']
+        selected_image = crop_note(img, candidates[0]['bbox'])
 
     # Finalize ALL inference paths, not just detector_crop.
     if response['status'] == 'REJECTED':
@@ -451,10 +420,12 @@ def health():
         "uptimeSeconds": round(time.time() - START_TIME),
         "classifierBundlePresent": MODEL_PATH.is_file(),
         "yoloWeightsPresent": YOLO_PATH.is_file(),
-        "inferencePolicy": "nearest-primary-v8-conservative-multiview-review",
-        "fullImageMinConfidence": FULL_IMAGE_MIN_CONF,
+        "inferencePolicy": "reference-direct-argmax" if INFERENCE_MODE == "direct" else "rotation-average-argmax",
+        "classifierInferenceMode": INFERENCE_MODE,
+        "fullImageMinConfidence": None,
+        "decisionRule": "argmax",
         "classifierResizeMethod": RESIZE_METHOD,
-        "verifyMultipleNotes": VERIFY_MULTIPLE_NOTES,
+        "verifyMultipleNotes": False,
     })
     return status
 
@@ -485,6 +456,7 @@ def predict(image: UploadFile = File(...), source: str = Form("upload"), request
         with Image.open(io.BytesIO(raw)) as incoming:
             if incoming.width * incoming.height > 25_000_000:
                 raise HTTPException(413, "Image resolution exceeds 25 megapixels")
+            original_format = incoming.format
             incoming.verify()
         with Image.open(io.BytesIO(raw)) as incoming:
             corrected = ImageOps.exif_transpose(incoming).convert("RGB")
@@ -495,7 +467,10 @@ def predict(image: UploadFile = File(...), source: str = Form("upload"), request
     uploads.mkdir(parents=True, exist_ok=True)
     corrected.save(uploads / f"{scan_id}.jpg", format="JPEG", quality=92)
     try:
-        return process_image(corrected, scan_id, source)
+        # JPEG/PNG are passed verbatim, matching the reference app. WebP is
+        # decoded to RGB PNG because TensorFlow decode_image lacks WebP support.
+        original = (raw, 'image/jpeg' if original_format == 'JPEG' else 'image/png') if original_format in ('JPEG', 'PNG') else None
+        return process_image(corrected, scan_id, source, original)
     except (FileNotFoundError, ValueError) as error:
         LOG.error("Model configuration error: %s", error)
         raise HTTPException(503, str(error))

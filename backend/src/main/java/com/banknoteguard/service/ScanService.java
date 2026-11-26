@@ -47,6 +47,21 @@ public class ScanService {
         this.aiUrl = aiUrl;
     }
 
+    // Legacy responses and pre-classification rejections may lack a breakdown.
+    private static boolean validProbability(Double value) {
+        return value == null || (Double.isFinite(value) && value >= 0 && value <= 1);
+    }
+
+    private static boolean validBreakdown(AiResult output) {
+        Double real = output.realProbability();
+        Double fake = output.fakeProbability();
+        Double invalid = output.invalidProbability();
+        if (!validProbability(real) || !validProbability(fake) || !validProbability(invalid)) return false;
+        if (real == null && invalid == null) return true; // old AI service or no inference
+        return real != null && fake != null && invalid != null
+                && Math.abs(real + fake + invalid - 1.0) <= 0.002;
+    }
+
     public ScanRecord run(MultipartFile image, String source) throws IOException {
         if (image == null || image.isEmpty()) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Please supply an image");
@@ -102,7 +117,7 @@ public class ScanService {
                 !source.equals(output.source()) || output.status() == null ||
                 !Set.of("REAL", "FAKE", "REJECTED").contains(output.status()) ||
                 (output.denomination() != null && (!Set.of(500, 1000).contains(output.denomination()) || "REJECTED".equals(output.status()))) ||
-                (output.confidence() != null && (!Double.isFinite(output.confidence()) || output.confidence() < 0 || output.confidence() > 1))) {
+                !validProbability(output.confidence()) || !validBreakdown(output)) {
             throw new ResponseStatusException(HttpStatus.BAD_GATEWAY, "Invalid reply from AI service");
         }
         ScanRecord record = repository.save(ScanRecord.of(output, filename));

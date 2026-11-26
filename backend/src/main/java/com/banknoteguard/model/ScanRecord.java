@@ -19,6 +19,8 @@ public class ScanRecord {
     private Integer denomination;
     private Double confidence;
     private Double fakeProbability;
+    private Double realProbability;
+    private Double invalidProbability;
     private Double threshold;
     private Double detectorConfidence;
     private Long durationMs;
@@ -42,6 +44,8 @@ public class ScanRecord {
         record.denomination = result.denomination();
         record.confidence = result.confidence();
         record.fakeProbability = result.fakeProbability();
+        record.realProbability = result.realProbability();
+        record.invalidProbability = result.invalidProbability();
         record.threshold = result.threshold();
         record.detectorConfidence = result.detectorConfidence();
         record.durationMs = result.durationMs();
@@ -60,6 +64,8 @@ public class ScanRecord {
     public Integer getDenomination() { return denomination; }
     public Double getConfidence() { return confidence; }
     public Double getFakeProbability() { return fakeProbability; }
+    public Double getRealProbability() { return realProbability; }
+    public Double getInvalidProbability() { return invalidProbability; }
     public Double getThreshold() { return threshold; }
     public Double getDetectorConfidence() { return detectorConfidence; }
     public Long getDurationMs() { return durationMs; }

@@ -1,13 +1,40 @@
 import { useEffect, useRef, useState } from 'react'
 import { Camera, Check, Clock3, History, ImagePlus, RefreshCw, ScanLine, Upload, X } from 'lucide-react'
 
+import { formatPercent, isProbability, scanConfidence, scoreRows } from './confidence.js'
+
 const ACCEPTED = new Set(['image/jpeg', 'image/png', 'image/webp'])
-const percent = value => value == null ? '—' : `${(Number(value) * 100).toFixed(1)}%`
+const percent = formatPercent
 const dateLabel = value => value ? new Date(value).toLocaleString() : '—'
 const needsReview = item => item.status === 'REJECTED' && String(item.inferencePath || '').startsWith('review_')
-const typeLabel = item => needsReview(item) ? 'Unverified' : item.status === 'REJECTED' ? 'Invalid' : 'Banknote'
-const statusLabel = item => needsReview(item) ? 'UNCERTAIN' : item.status === 'REJECTED' ? 'INVALID' : item.status
+const typeLabel = item => needsReview(item) ? 'Legacy scan' : item.status === 'REJECTED' ? 'Invalid' : 'Banknote'
+const statusLabel = item => needsReview(item) ? 'RESCAN' : item.status === 'REJECTED' ? 'INVALID' : item.status
 const shortId = value => value ? String(value).slice(0, 8).toUpperCase() : '—'
+
+function PredictionConfidence({ result }) {
+  const score = scanConfidence(result)
+  return (
+    <div className="prediction-confidence">
+      <div className="confidence-summary">
+        <span>{score.label}{score.detail ? ` (${score.detail})` : ''}</span>
+        <strong>{percent(score.value)}</strong>
+      </div>
+      <div className="confidence-breakdown-title">Model probability breakdown</div>
+      {scoreRows(result).map(row => (
+        <div className={`confidence-row ${row.kind}`} key={row.kind}>
+          <div className="confidence-row-label"><span>{row.label}</span><strong>{percent(row.value)}</strong></div>
+          <div className="confidence-track" aria-hidden="true">
+            <div className="confidence-fill" style={{ width: `${isProbability(row.value) ? row.value * 100 : 0}%` }} />
+          </div>
+        </div>
+      ))}
+      <p className="confidence-note">
+        Highest model score determines the prediction. Model scores do not establish physical authenticity.
+        {!scoreRows(result).every(row => isProbability(row.value)) && ' Unavailable scores are shown as —.'}
+      </p>
+    </div>
+  )
+}
 
 export default function App() {
   const [file, setFile] = useState(null)
@@ -285,15 +312,17 @@ export default function App() {
 
           {result && (
             <section className={`scan-result ${String(result.status).toLowerCase()}`} aria-live="polite">
+              <div className="result-header">
               <div className="result-primary">
                 <strong>{statusLabel(result)}</strong>
                 <span>{result.status === 'REJECTED' ? (result.reason || 'Not detected') : typeLabel(result)}</span>
               </div>
               <div className="result-meta">
-                <span>{result.confidence == null ? '—' : percent(result.confidence)}</span>
                 <span>{result.durationMs ?? '—'} ms</span>
                 <span>#{shortId(result.id || result.requestId)}</span>
               </div>
+              </div>
+              <PredictionConfidence result={result} />
             </section>
           )}
         </section>

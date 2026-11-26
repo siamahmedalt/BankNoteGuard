@@ -39,7 +39,12 @@ def box(b,conf=.9,denom=None):
 
 
 def pred(status='REAL',confidence=.96):
-    return {'status':status,'confidence':confidence,'fakeProbability':.02 if status=='REAL' else .96 if status=='FAKE' else .01,
+    names = ('real_notes', 'fake_notes', 'not_banknotes')
+    label = ('REAL','FAKE','REJECTED').index(status)
+    probs = [(1-confidence)/2]*3
+    probs[label] = confidence
+    return {'status':status,'confidence':confidence,'fakeProbability':probs[1],
+            'probabilities':dict(zip(names,probs)),
             'threshold':None,'reason':'Image is not a supported banknote.' if status=='REJECTED' else None}
 
 
@@ -65,51 +70,49 @@ def run(monkeypatch,tmp_path,boxes,outputs):
 def test_duplicate_nested_boxes_one_note(monkeypatch,tmp_path):
     r,c=run(monkeypatch,tmp_path,[box((10,20,390,180),.72),box((40,40,170,100),.99),box((12,22,385,178),.9)],[pred()])
     assert r['status']=='REAL' and r['detectorBoxCount']==3 and r['candidateCount']==1
-    assert r['inferencePath']=='full_image_primary' and c==[(400,200)]
+    assert r['inferencePath']=='rotation_average_argmax' and len(c)==8
     assert c[0][0]>=380
 
 
 def test_disjoint_fragments_use_full_image(monkeypatch,tmp_path):
     r,c=run(monkeypatch,tmp_path,[box((10,20,140,175)),box((230,20,390,180))],[pred('FAKE')])
-    assert r['status']=='FAKE' and r['inferencePath']=='multi_view_verified' and len(c)==3
+    assert r['status']=='FAKE' and r['inferencePath']=='rotation_average_argmax' and len(c)==8
 
 
-def test_multiple_separate_confirmed(monkeypatch,tmp_path):
-    monkeypatch.setattr(ai,'VERIFY_MULTIPLE_NOTES',True)
-    r,c=run(monkeypatch,tmp_path,[box((10,10,180,90)),box((210,110,380,190))],[pred(),pred('FAKE')])
-    assert r['status']=='REJECTED' and r['inferencePath']=='multiple_confirmed' and len(c)==2
+def test_multiple_boxes_do_not_override_argmax(monkeypatch,tmp_path):
+    r,c=run(monkeypatch,tmp_path,[box((10,10,180,90)),box((210,110,380,190))],[pred('FAKE')])
+    assert r['status']=='FAKE' and r['inferencePath']=='rotation_average_argmax' and len(c)==8
 
 
 def test_second_box_is_false_positive(monkeypatch,tmp_path):
-    monkeypatch.setattr(ai,'VERIFY_MULTIPLE_NOTES',True)
-    r,c=run(monkeypatch,tmp_path,[box((10,10,180,90)),box((210,110,380,190))],[pred(),pred('REJECTED'),pred()])
-    assert r['status']=='REAL' and r['inferencePath']=='full_image_primary' and c[-1]==(400,200)
+    r,c=run(monkeypatch,tmp_path,[box((10,10,180,90)),box((210,110,380,190))],[pred()])
+    assert r['status']=='REAL' and r['inferencePath']=='rotation_average_argmax' and (400,200) in c
 
 
 def test_no_box_non_note(monkeypatch,tmp_path):
     r,c=run(monkeypatch,tmp_path,[],[pred('REJECTED',.99)])
-    assert r['status']=='REJECTED' and r['inferencePath']=='non_banknote_confirmed' and len(c)==3
+    assert r['status']=='REJECTED' and r['inferencePath']=='rotation_average_argmax' and len(c)==8
 
 
 def test_no_box_high_confidence_note(monkeypatch,tmp_path):
     r,c=run(monkeypatch,tmp_path,[],[pred()])
-    assert r['status']=='REAL' and r['denomination'] is None and c==[(400,200)]
+    assert r['status']=='REAL' and r['denomination'] is None and len(c)==8
 
 
-def test_no_box_low_confidence_note_rejected(monkeypatch,tmp_path):
+def test_no_box_low_confidence_note_argmax(monkeypatch,tmp_path):
     r,c=run(monkeypatch,tmp_path,[],[pred('REAL',.60)])
-    assert r['status']=='REJECTED' and r['threshold']==.70 and r['confidence'] is None
+    assert r['status']=='REAL' and r['threshold'] is None and r['confidence']==pytest.approx(.60)
 
 
 def test_full_note_accepted_despite_fragment_box(monkeypatch,tmp_path):
     r,c=run(monkeypatch,tmp_path,[box((20,20,150,100),denom=500)],[pred('REAL')])
-    assert r['status']=='REAL' and r['inferencePath']=='full_image_primary' and r['denomination']==500
-    assert c[-1]==(400,200)
+    assert r['status']=='REAL' and r['inferencePath']=='rotation_average_argmax' and r['denomination']==500
+    assert c[0]==(400,200) or (400,200) in c
 
 
 def test_full_non_note_rejected_despite_detection(monkeypatch,tmp_path):
     r,c=run(monkeypatch,tmp_path,[box((20,20,150,100),denom=500)],[pred('REJECTED')])
-    assert r['status']=='REJECTED' and r['denomination'] is None and len(c)==3
+    assert r['status']=='REJECTED' and r['denomination'] is None and len(c)==8
 
 
 def test_denomination_only_when_detector_supplies_it(monkeypatch,tmp_path):
@@ -131,24 +134,23 @@ def test_detector_receives_bgr(monkeypatch):
 
 
 def test_legacy_detector_strong_fragments_never_count_as_multiple(monkeypatch,tmp_path):
-    monkeypatch.setattr(ai,'VERIFY_MULTIPLE_NOTES',False)
     r,c=run(monkeypatch,tmp_path,[box((10,10,180,90)),box((210,110,380,190))],[pred()])
-    assert r['status']=='REAL' and r['inferencePath']=='full_image_primary' and c==[(400,200)]
+    assert r['status']=='REAL' and r['inferencePath']=='rotation_average_argmax' and len(c)==8
 
 
 @pytest.mark.parametrize('boxes', [[], [box((10,20,140,175)),box((230,20,390,180))]])
 @pytest.mark.parametrize('confidence', [.70,.71,.8443974])
 def test_full_fake_note_not_rejected_by_old_90_percent_gate(monkeypatch,tmp_path,boxes,confidence):
     r,c=run(monkeypatch,tmp_path,boxes,[pred('FAKE',confidence)])
-    assert r['status']=='FAKE' and r['confidence']==pytest.approx(confidence,abs=1e-6) and r['threshold']==.70
+    assert r['status']=='FAKE' and r['confidence']==pytest.approx(confidence,abs=1e-6) and r['threshold'] is None
 
 def test_full_fake_84_percent_accepted_despite_fragment_box(monkeypatch,tmp_path):
     r,c=run(monkeypatch,tmp_path,[box((20,20,150,100))],[pred('FAKE',.8443974)])
-    assert r['status']=='FAKE' and r['inferencePath']=='multi_view_verified'
+    assert r['status']=='FAKE' and r['inferencePath']=='rotation_average_argmax'
 
-def test_low_confidence_fake_still_rejected(monkeypatch,tmp_path):
+def test_low_confidence_fake_argmax(monkeypatch,tmp_path):
     r,c=run(monkeypatch,tmp_path,[],[pred('FAKE',.699)])
-    assert r['status']=='REJECTED'
+    assert r['status']=='FAKE' and r['confidence']==pytest.approx(.699)
 
 def test_non_note_still_rejected(monkeypatch,tmp_path):
     r,c=run(monkeypatch,tmp_path,[],[pred('REJECTED',.99)])
@@ -156,9 +158,9 @@ def test_non_note_still_rejected(monkeypatch,tmp_path):
 
 
 @pytest.mark.parametrize('status', ['REAL', 'FAKE'])
-def test_low_confidence_with_yolo_box_still_rejected(monkeypatch,tmp_path,status):
+def test_low_confidence_with_yolo_box_argmax(monkeypatch,tmp_path,status):
     r,c=run(monkeypatch,tmp_path,[box((20,20,150,100))],[pred(status,.69)])
-    assert r['status']=='REJECTED' and r['confidence'] is None and len(c)==3 and r['inferencePath']=='review_uncertain'
+    assert r['status']==status and r['confidence']==pytest.approx(.69) and len(c)==8 and r['inferencePath']=='rotation_average_argmax'
 
 def test_ocr_failure_preserves_authenticity(monkeypatch,tmp_path):
     def broken(*args): raise RuntimeError('OCR unavailable')
@@ -167,44 +169,67 @@ def test_ocr_failure_preserves_authenticity(monkeypatch,tmp_path):
     assert r['status']=='REAL' and r['denomination'] is None
 
 
-# Explicit V8 regression scenarios; outputs are simulated, not actual model accuracy.
-def test_weak_original_real_not_overridden_by_alternate_views(monkeypatch,tmp_path):
-    r,c=run(monkeypatch,tmp_path,[],[pred('REAL',.62),pred('REAL',.86),pred('REAL',.9)])
-    assert r['status']=='REJECTED' and r['inferencePath']=='review_uncertain'
+# V10 consensus regression cases. Model outputs are mocked, not accuracy claims.
+@pytest.mark.parametrize('label', ['REAL','FAKE','REJECTED'])
+def test_all_eight_views_agree(label):
+    r,path=ai.aggregate_stability([pred(label,.9)]*8)
+    assert r['status']==label and r['confidence']==.9
 
-def test_strong_fake_conflicting_real_not_called_fake(monkeypatch,tmp_path):
-    r,c=run(monkeypatch,tmp_path,[],[pred('FAKE',.97),pred('REAL',.93),pred('FAKE',.89)])
-    assert r['status']=='REJECTED' and r['inferencePath']=='review_uncertain'
+@pytest.mark.parametrize('label,opposite', [('REAL','FAKE'),('FAKE','REAL')])
+def test_conflicting_families_tie_class_order(label,opposite):
+    r,path=ai.aggregate_stability([pred(label,.99)]*4+[pred(opposite,.99)]*4)
+    assert r['status']=='REAL' and path=='rotation_average_argmax' and r['confidence']==pytest.approx(.4975)
 
-def test_single_strong_alternate_is_not_enough(monkeypatch,tmp_path):
-    r,c=run(monkeypatch,tmp_path,[],[pred('REAL',.51),pred('REAL',.94),pred('FAKE',.62)])
-    assert r['status']=='REJECTED' and r['inferencePath']=='review_uncertain'
+@pytest.mark.parametrize('label', ['REAL','FAKE'])
+def test_low_confidence_average_argmax(label):
+    r,path=ai.aggregate_stability([pred(label,.65)]*8)
+    assert path=='rotation_average_argmax' and r['status']==label and r['confidence']==pytest.approx(.65)
 
-def test_confirmed_fake_keeps_fake(monkeypatch,tmp_path):
-    r,c=run(monkeypatch,tmp_path,[],[pred('FAKE',.81),pred('FAKE',.85),pred('FAKE',.8)])
-    assert r['status']=='FAKE' and r['confidence']==.82
+@pytest.mark.parametrize('turn', [Image.Transpose.ROTATE_90,Image.Transpose.ROTATE_180,Image.Transpose.ROTATE_270])
+@pytest.mark.parametrize('size',[(401,203),(203,401),(201,203)])
+def test_quarter_turn_view_sets_identical(turn,size):
+    import hashlib
+    import numpy as np
+    img=Image.fromarray(np.random.default_rng(1).integers(0,256,(size[1],size[0],3),dtype=np.uint8))
+    def keys(im):
+        return sorted((name.split('_')[0],image.size,hashlib.sha256(image.tobytes()).hexdigest()) for name,image in ai.stability_views(im))
+    assert keys(img)==keys(img.transpose(turn))
 
-def test_non_note_cannot_be_rescued_by_one_fake_vote(monkeypatch,tmp_path):
-    r,c=run(monkeypatch,tmp_path,[],[pred('REJECTED',.98),pred('REJECTED',.96),pred('FAKE',.99)])
-    assert r['status']=='REJECTED'
+@pytest.mark.parametrize('label', ['REAL','FAKE'])
+def test_vote_order_invariant(label):
+    views=[pred(label,.91),pred(label,.89),pred(label,.86),pred('REJECTED',.52),pred(label,.9),pred(label,.95),pred(label,.92),pred('REJECTED',.51)]
+    first=ai.aggregate_stability(views)
+    for k in range(4):
+        rotated=views[k:4]+views[:k]+views[4+k:]+views[4:4+k]
+        assert ai.aggregate_stability(rotated)==first
 
-def test_portrait_conflicting_rotations_trigger_review(monkeypatch):
-    outputs=iter([pred('FAKE',.94),pred('FAKE',.95),pred('FAKE',.89),pred('REAL',.92),pred('REAL',.91)])
-    monkeypatch.setattr(ai,'classify_note',lambda img:next(outputs))
-    result,path,views=ai.verify_prediction(Image.new('RGB',(100,220)),[], 'portrait-test')
-    assert result['status']=='REJECTED' and path=='review_uncertain' and len(views)==5
-
-def test_square_crop_not_rotated(monkeypatch):
-    outputs=iter([pred('FAKE',.94),pred('FAKE',.95),pred('FAKE',.89)])
-    monkeypatch.setattr(ai,'classify_note',lambda img:next(outputs))
-    result,path,views=ai.verify_prediction(Image.new('RGB',(200,220)),[], 'crop-test')
-    assert result['status']=='FAKE' and len(views)==3
-
-
-def test_weak_real_cannot_be_overridden_by_smoothed_fake_views(monkeypatch,tmp_path):
-    r,c=run(monkeypatch,tmp_path,[],[pred('REAL',.60),pred('FAKE',.94),pred('FAKE',.95)])
-    assert r['status']=='REJECTED' and r['inferencePath']=='review_uncertain'
+def test_always_eight_views_even_if_first_real(monkeypatch):
+    monkeypatch.setattr(ai,'classify_note',lambda img: pred('REAL',.99))
+    result,path,views=ai.verify_prediction(Image.new('RGB',(100,220)),[], 'test')
+    assert len(views)==8 and result['status']=='REAL'
 
 def test_resize_default_matches_worker():
     import classifier_worker as worker
-    assert ai.RESIZE_METHOD == worker.RESIZE_METHOD == 'NEAREST'
+    assert ai.RESIZE_METHOD == worker.RESIZE_METHOD == 'BILINEAR'
+
+@pytest.mark.parametrize('label,score,path', [
+    ('REAL', .92, 'rotation_average_argmax'),
+    ('FAKE', .87, 'rotation_average_argmax'),
+    ('REJECTED', .98, 'rotation_average_argmax'),
+    ('REAL', .55, 'rotation_average_argmax'),
+])
+def test_v14_scan_exposes_three_scores(monkeypatch,tmp_path,label,score,path):
+    expected = pred(label,score)['probabilities']
+    r,_ = run(monkeypatch,tmp_path,[],[pred(label,score)])
+    assert r['inferencePath'] == path
+    for field, name in [('realProbability','real_notes'),('fakeProbability','fake_notes'),('invalidProbability','not_banknotes')]:
+        assert r[field] == pytest.approx(expected[name])
+    assert sum(r[f] for f in ('realProbability','fakeProbability','invalidProbability')) == pytest.approx(1)
+    assert r['confidence'] == pytest.approx(score)
+
+
+def test_all_scores_for_multiple_boxes(monkeypatch,tmp_path):
+    r,_=run(monkeypatch,tmp_path,[box((10,10,180,90)),box((210,110,380,190))],[pred('FAKE',.49)])
+    assert r['inferencePath']=='rotation_average_argmax'
+    assert r['status']=='FAKE' and r['confidence']==pytest.approx(.49)
+    assert sum(r[key] for key in ('realProbability','fakeProbability','invalidProbability')) == pytest.approx(1)

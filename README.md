@@ -1,3 +1,19 @@
+# BankNoteGuard V16 — TensorFlow argmax
+
+**Current instructions:** [V16_ARGMAX_TENSORFLOW.md](V16_ARGMAX_TENSORFLOW.md). Direct TensorFlow inference and highest-score classification are the defaults. No minimum classification confidence and no UNCERTAIN output for new scans. Older sections below are historical; their threshold and consensus rejection instructions are superseded.
+
+# BankNoteGuard V15 — reference Python app integration
+
+Read [V15_REFERENCE_INTEGRATION.md](V15_REFERENCE_INTEGRATION.md) for direct mode, comparative results and configuration. Consensus remains the default because the reference mode increased false FAKE results in the supplied samples. V14 confidence display is retained. Older notes below are historical.
+
+# BankNoteGuard V14 — scan confidence display
+
+Read [V14_CONFIDENCE_DISPLAY.md](V14_CONFIDENCE_DISPLAY.md) for the current output format and deployment instructions. The V13 model and inference policy are unchanged.
+
+# BankNoteGuard V13 — training-aligned inference (based on supplied V10)
+
+Read [V13_TRAINING_ALIGNMENT.md](V13_TRAINING_ALIGNMENT.md) first. This build uses the supplied training notebook's TensorFlow bilinear preprocessing and preserves the V10 consensus rule. Model weights and deployment ports are unchanged. Older version notes and diagnostics are historical.
+
 # V8 classification review update
 
 See [V8_FIX_NOTES.md](V8_FIX_NOTES.md) for current inference policy, diagnostic commands, and limitations. Older instructions below may describe earlier versions.
@@ -123,4 +139,4 @@ Java stores results in PostgreSQL `scans` records. Python appends prediction met
 
 
 ## V9 preprocessing correction
-See `V9_FIX_NOTES.md` for current experimental policy, test evidence and limitations. `diagnostics/` contains CSVs. The resize method is now configurable through `CLASSIFIER_RESIZE_METHOD` (default `NEAREST`).
+See `V13_TRAINING_ALIGNMENT.md` for current test evidence and limitations. `diagnostics/` contains historical CSVs and the V13 comparison. `CLASSIFIER_RESIZE_METHOD` must be `BILINEAR` for this checkpoint.

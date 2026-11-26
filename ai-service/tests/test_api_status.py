@@ -31,14 +31,13 @@ def test_full_note_upload_contract(monkeypatch, tmp_path):
     monkeypatch.setattr(ai, 'STORAGE', tmp_path)
     monkeypatch.setattr(ai, 'MODEL_STATE', {'ready': True, 'message': 'ready'})
     monkeypatch.setattr(ai, '_worker_health', lambda: {'ready': True})
-    monkeypatch.setattr(ai, 'VERIFY_MULTIPLE_NOTES', False)
     monkeypatch.setattr(ai, 'detect_candidates', lambda img: [
         {'bbox': (10,10,150,100), 'confidence': .95, 'denomination': None},
         {'bbox': (200,10,390,100), 'confidence': .94, 'denomination': None},
     ])
     monkeypatch.setattr(ai, 'classify_note', lambda img: {
         'status': 'REAL', 'confidence': .97, 'fakeProbability': .02,
-        'threshold': None, 'reason': None,
+        'threshold': None, 'reason': None, 'probabilities': {'real_notes':.97,'fake_notes':.02,'not_banknotes':.01},
     })
     raw = io.BytesIO()
     Image.new('RGB', (400,200)).save(raw, 'PNG')
@@ -50,5 +49,6 @@ def test_full_note_upload_contract(monkeypatch, tmp_path):
             assert response.status_code == 200
             body = response.json()
             assert body['status'] == 'REAL' and body['requestId'] == scan_id
-            assert body['inferencePath'] == 'full_image_primary' and body['detectorBoxCount'] == 2
+            assert (body['realProbability'],body['fakeProbability'],body['invalidProbability']) == (.97,.02,.01)
+            assert body['inferencePath'] == 'rotation_average_argmax' and body['detectorBoxCount'] == 2
             assert client.get('/history-image/'+scan_id).status_code == 200

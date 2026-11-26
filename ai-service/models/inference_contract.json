@@ -1,0 +1,24 @@
+{
+  "source_notebook": "training/build-efficientnetb0-final.ipynb",
+  "input_size": [
+    224,
+    224,
+    3
+  ],
+  "dtype": "float32",
+  "pixel_range": [
+    0,
+    255
+  ],
+  "resize_method": "BILINEAR",
+  "antialias": false,
+  "class_mapping": {
+    "real_notes": 0,
+    "fake_notes": 1,
+    "not_banknotes": 2
+  },
+  "model_file": "best_efficientnetb0_3class.keras",
+  "model_sha256": "3ab531b7c891cd8fa72a55adf1186dc9c299c93929f3e27aed63c4ebbb66f13d",
+  "backup_final_sha256": "e00fed28622d4bda63d4c6bb8ebc21077b916dee8f5db71c05319bf6b3b43ed3",
+  "preprocessing_note": "EXIF-corrected RGB views transported losslessly as PNG; TensorFlow performs the only resize. Original notebook decodes source files directly; JPEG decoder and EXIF handling may differ."
+}
